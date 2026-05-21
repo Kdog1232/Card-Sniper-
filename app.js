@@ -54,13 +54,12 @@ scanBtn.addEventListener("click", async () => {
   }
 });
 
-const SUPABASE_PROJECT_URL = (window.SUPABASE_PROJECT_URL || "").replace(/\/$/, "");
-const SUPABASE_FUNCTION_URL = window.SUPABASE_FUNCTION_URL || (SUPABASE_PROJECT_URL ? `${SUPABASE_PROJECT_URL}/functions/v1/scan-card` : "");
+const SUPABASE_FUNCTION_URL = (window.SUPABASE_FUNCTION_URL || "").replace(/\/$/, "");
 const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || "";
 
 async function analyzeCardWithOpenAI(base64Image, askingPrice) {
   if (!SUPABASE_FUNCTION_URL || !SUPABASE_ANON_KEY) {
-    throw new Error("Missing Supabase config. Set window.SUPABASE_PROJECT_URL (or window.SUPABASE_FUNCTION_URL) and window.SUPABASE_ANON_KEY.");
+    throw new Error("Missing Supabase config. Set window.SUPABASE_FUNCTION_URL and window.SUPABASE_ANON_KEY.");
   }
 
   const response = await fetch(SUPABASE_FUNCTION_URL, {
