@@ -47,29 +47,20 @@ scanBtn.addEventListener("click", async () => {
     renderResult({ aiCard, comps, verdict, askingPrice });
   } catch (err) {
     console.error(err);
-    alert("Scan failed. Check API setup in app.js.");
+    alert(`Scan failed: ${err.message}`);
   } finally {
     scanBtn.disabled = false;
     scanBtn.textContent = "Scan Card";
   }
 });
 
-const SUPABASE_FUNCTION_URL = window.SUPABASE_FUNCTION_URL || "";
+const SUPABASE_PROJECT_URL = (window.SUPABASE_PROJECT_URL || "").replace(/\/$/, "");
+const SUPABASE_FUNCTION_URL = window.SUPABASE_FUNCTION_URL || (SUPABASE_PROJECT_URL ? `${SUPABASE_PROJECT_URL}/functions/v1/scan-card` : "");
 const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || "";
 
 async function analyzeCardWithOpenAI(base64Image, askingPrice) {
-  // Keep mock mode for fast UI demos + development.
   if (!SUPABASE_FUNCTION_URL || !SUPABASE_ANON_KEY) {
-    return {
-      player: "Shohei Ohtani",
-      year: "2018",
-      set: "Topps Chrome",
-      variation: "Base Rookie",
-      condition: 8,
-      estimatedMarketValue: 145,
-      gradedUpside: 230,
-      reasoning: "Strong rookie demand and healthy recent comps. Surface and centering look clean with possible grading upside.",
-    };
+    throw new Error("Missing Supabase config. Set window.SUPABASE_PROJECT_URL (or window.SUPABASE_FUNCTION_URL) and window.SUPABASE_ANON_KEY.");
   }
 
   const response = await fetch(SUPABASE_FUNCTION_URL, {
