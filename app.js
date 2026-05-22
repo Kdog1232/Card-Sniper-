@@ -14,6 +14,9 @@ const askingValue = document.getElementById("askingValue");
 const upsideValue = document.getElementById("upsideValue");
 const psaUpsideValue = document.getElementById("psaUpsideValue");
 const reasoning = document.getElementById("reasoning");
+const compSummary = document.getElementById("compSummary");
+const recentSales = document.getElementById("recentSales");
+const compListings = document.getElementById("compListings");
 
 let imageDataUrl = "";
 
@@ -55,6 +58,7 @@ scanBtn.addEventListener("click", async () => {
 });
 
 const SUPABASE_FUNCTION_URL = (window.SUPABASE_FUNCTION_URL || "").replace(/\/$/, "");
+const SUPABASE_EBAY_COMPS_URL = (window.SUPABASE_EBAY_COMPS_URL || "").replace(/\/$/, "");
 const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || "";
 
 async function analyzeCardWithOpenAI(base64Image, askingPrice) {
@@ -85,13 +89,51 @@ async function analyzeCardWithOpenAI(base64Image, askingPrice) {
 }
 
 async function fetchEbayComps(aiCard) {
-  // MVP placeholder: wire this to eBay Browse API sold-listing endpoint via backend.
-  const base = aiCard.estimatedMarketValue || 120;
-  return {
-    averageComp: base,
-    highComp: Math.round(base * 1.18),
-    lowComp: Math.round(base * 0.82),
+  const fallbackBase = Number(aiCard.estimatedMarketValue || 0);
+  const fallback = {
+    averageComp: fallbackBase,
+    lowestComp: fallbackBase * 0.82,
+    highestComp: fallbackBase * 1.18,
+    recentSales: fallbackBase ? [fallbackBase] : [],
+    listings: [],
+    compCount: fallbackBase ? 1 : 0,
+    usedFallback: true,
   };
+
+  if (!SUPABASE_EBAY_COMPS_URL || !SUPABASE_ANON_KEY) return fallback;
+
+  try {
+    const response = await fetch(SUPABASE_EBAY_COMPS_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      },
+      body: JSON.stringify({
+        player: aiCard.player,
+        year: aiCard.year,
+        set: aiCard.set,
+        variation: aiCard.variation,
+      }),
+    });
+
+    if (!response.ok) throw new Error(`ebay-comps failed: ${response.status}`);
+
+    const data = await response.json();
+    return {
+      averageComp: Number(data.averageComp || 0),
+      lowestComp: Number(data.lowestComp || 0),
+      highestComp: Number(data.highestComp || 0),
+      recentSales: Array.isArray(data.recentSales) ? data.recentSales.map(Number).filter(Number.isFinite) : [],
+      listings: Array.isArray(data.listings) ? data.listings : [],
+      compCount: Number(data.compCount || 0),
+      usedFallback: false,
+    };
+  } catch (error) {
+    console.warn("eBay comps fallback triggered", error);
+    return fallback;
+  }
 }
 
 function scoreDeal(asking, marketValue) {
@@ -130,7 +172,34 @@ function renderResult({ aiCard, comps, verdict, askingPrice }) {
   estimatedValue.textContent = `$${comps.averageComp.toFixed(2)}`;
   askingValue.textContent = `$${askingPrice.toFixed(2)}`;
   upsideValue.textContent = `$${(comps.averageComp - askingPrice).toFixed(2)}`;
-  psaUpsideValue.textContent = `$${Math.max(0, (aiCard.gradedUpside || comps.highComp) - askingPrice).toFixed(2)}`;
+  psaUpsideValue.textContent = `$${Math.max(0, (aiCard.gradedUpside || comps.highestComp) - askingPrice).toFixed(2)}`;
 
   reasoning.textContent = aiCard.reasoning || "Comp spread and card attributes suggest a neutral buy zone.";
+
+  const salesText = comps.recentSales.length
+    ? comps.recentSales.map((sale) => `$${sale.toFixed(2)}`).join(" • ")
+    : "No recent sold prices returned.";
+  recentSales.textContent = salesText;
+
+  compSummary.textContent = comps.compCount
+    ? `Based on ${comps.compCount} recent comps${comps.usedFallback ? " (AI fallback)" : ""}`
+    : "No reliable comps returned. Showing AI estimate fallback.";
+
+  compListings.innerHTML = "";
+  comps.listings.forEach((listing) => {
+    const item = document.createElement("a");
+    item.className = "comp-item";
+    item.href = listing.url;
+    item.target = "_blank";
+    item.rel = "noopener noreferrer";
+    item.innerHTML = `
+      <img src="${listing.image || ""}" alt="${listing.title}" loading="lazy" />
+      <div>
+        <p class="comp-title">${listing.title}</p>
+        <p class="comp-price">$${Number(listing.price).toFixed(2)}</p>
+      </div>
+    `;
+    compListings.appendChild(item);
+  });
+
 }

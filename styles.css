@@ -127,3 +127,21 @@ input {
   .container { grid-template-columns: 1fr 1fr; align-items: start; }
   .result-panel { position: sticky; top: .8rem; }
 }
+
+.comp-summary { margin: .6rem 0 .3rem; font-weight: 700; color: #c8d1f6; }
+.recent-sales { margin: 0 0 .7rem; font-size: .9rem; color: var(--muted); }
+.comp-listings { display: grid; gap: .55rem; }
+.comp-item {
+  display: grid;
+  grid-template-columns: 58px 1fr;
+  gap: .65rem;
+  text-decoration: none;
+  color: inherit;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid #28304f;
+  border-radius: 10px;
+  padding: .45rem;
+}
+.comp-item img { width: 58px; height: 58px; object-fit: cover; border-radius: 8px; background: #05070d; }
+.comp-title { margin: 0; font-size: .83rem; color: #e8edff; line-height: 1.25; }
+.comp-price { margin: .22rem 0 0; color: #97f5bb; font-weight: 700; }
