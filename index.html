@@ -52,12 +52,17 @@
         </div>
 
         <p id="reasoning" class="reasoning">Scan a card to see the expert breakdown.</p>
+
+        <p id="compSummary" class="comp-summary">Based on 0 recent comps</p>
+        <p id="recentSales" class="recent-sales">Recent sold prices will appear here.</p>
+        <div id="compListings" class="comp-listings"></div>
       </section>
     </main>
 
     <script>
       window.SUPABASE_PROJECT_URL = "https://yerwrbfqctpxfrycuhgv.supabase.co";
-      window.SUPABASE_FUNCTION_URL = "https://yerwrbfqctpxfrycuhgv.supabase.co/functions/v1/Card-Sniper-";
+      window.SUPABASE_FUNCTION_URL = "https://yerwrbfqctpxfrycuhgv.supabase.co/functions/v1/scan-card";
+      window.SUPABASE_EBAY_COMPS_URL = "https://yerwrbfqctpxfrycuhgv.supabase.co/functions/v1/ebay-comps";
       window.SUPABASE_ANON_KEY = "sb_publishable_ciPyBa4BuLObgsQbk2nCAQ_QdYeeNKd";
     </script>
 
