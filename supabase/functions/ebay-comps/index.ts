@@ -28,7 +28,7 @@ type EbayCompResponse = {
   soldOnly: true;
 };
 
-const BLOCKED_KEYWORDS = ["pack", "packs", "lot", "lots", "reprint", "custom", "digital", "epack", "e-pack"];
+const BLOCKED_KEYWORDS = ["pack", "packs", "lot", "lots", "reprint", "custom", "digital", "epack", "e-pack", "mystery pack", "fake"];
 const SPAM_KEYWORDS = ["gem mint", "investment", "🔥", "hot", "rare!!", "1/1", "one of one"];
 const GRADED_KEYWORDS = [
   "psa",
@@ -60,46 +60,45 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: "Missing card metadata for comp search." }, 400);
     }
 
-    const token = await getAppToken();
-    console.log("eBay token generated");
+    const appId = getAppId();
+    const searchUrl = new URL("https://svcs.ebay.com/services/search/FindingService/v1");
+    searchUrl.searchParams.set("OPERATION-NAME", "findCompletedItems");
+    searchUrl.searchParams.set("SERVICE-VERSION", "1.13.0");
+    searchUrl.searchParams.set("SECURITY-APPNAME", appId);
+    searchUrl.searchParams.set("RESPONSE-DATA-FORMAT", "JSON");
+    searchUrl.searchParams.set("REST-PAYLOAD", "");
+    searchUrl.searchParams.set("keywords", query);
+    searchUrl.searchParams.set("paginationInput.entriesPerPage", "50");
+    searchUrl.searchParams.set("itemFilter(0).name", "SoldItemsOnly");
+    searchUrl.searchParams.set("itemFilter(0).value", "true");
+    searchUrl.searchParams.set("sortOrder", "EndTimeSoonest");
 
-    const searchUrl = new URL("https://api.ebay.com/buy/browse/v1/item_summary/search");
-    searchUrl.searchParams.set("q", query);
-    searchUrl.searchParams.set("limit", "30");
-    searchUrl.searchParams.set("filter", "soldItemsOnly:true");
+    console.log("Using SOLD listings endpoint");
     console.log("Search query:", query);
-    console.log("eBay request URL:", searchUrl.toString());
 
-    const ebayResp = await fetch(searchUrl.toString(), {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-    });
+    const ebayResp = await fetch(searchUrl.toString());
     console.log("eBay response status:", ebayResp.status);
 
     if (!ebayResp.ok) {
       const errText = await ebayResp.text();
-      console.error("Browse API failed", ebayResp.status, errText);
+      console.error("Completed items API failed", ebayResp.status, errText);
       return jsonResponse({ error: "Failed to fetch eBay comps." }, 502);
     }
 
     const ebayData = await ebayResp.json();
-    console.log("eBay raw data:", JSON.stringify(ebayData));
-    const itemSummaries = Array.isArray(ebayData?.itemSummaries) ? ebayData.itemSummaries : [];
-    console.log("Items found:", itemSummaries.length);
+    const items = ebayData?.findCompletedItemsResponse?.[0]?.searchResult?.[0]?.item ?? [];
+    console.log("Sold items returned:", Array.isArray(items) ? items.length : 0);
     const scannedCardLooksGraded = looksGraded(query);
 
-    const soldListings = itemSummaries
+    const soldListings = (Array.isArray(items) ? items : [])
       .map((item: any) => {
-        const title = String(item?.title ?? "").trim();
-        const price = Number(item?.price?.value);
-        const image = String(item?.image?.imageUrl ?? "");
-        const url = String(item?.itemWebUrl ?? "");
-        const sold = isSoldItem(item);
-        const itemEndDate = String(item?.itemEndDate ?? "");
+        const title = String(item?.title?.[0] ?? "").trim();
+        const price = Number(item?.sellingStatus?.[0]?.currentPrice?.[0]?.__value__);
+        const image = String(item?.galleryURL?.[0] ?? "");
+        const url = String(item?.viewItemURL?.[0] ?? "");
+        const sold = String(item?.sellingStatus?.[0]?.sellingState?.[0] ?? "") === "EndedWithSales";
 
-        return { title, price, image, url, sold, itemEndDate };
+        return { title, price, image, url, sold };
       })
       .filter((item: any) => item.sold)
       .filter((item: any) => item.title && Number.isFinite(item.price) && item.price > 0 && item.url)
@@ -117,21 +116,23 @@ Deno.serve(async (req: Request) => {
       }))
       .sort((a, b) => b.score - a.score);
 
-    const sortedListings = scoredListings.map(({ score: _score, sold: _sold, itemEndDate: _itemEndDate, ...listing }) => listing);
+    const sortedListings = scoredListings.map(({ score: _score, sold: _sold, ...listing }) => listing);
     const rawPrices = sortedListings.map((item: EbayListing) => item.price);
     const prices = excludeOutlierPrices(rawPrices);
 
-    const weightedRecentSales = prices.slice(0, 10);
-
+    const recentSales = prices.slice(0, 10);
+    const averageComp = average(prices);
     const medianComp = median(prices);
+    const lowestComp = prices.length ? Math.min(...prices) : 0;
+    const highestComp = prices.length ? Math.max(...prices) : 0;
     console.log("Final median price used:", medianComp);
 
     const response: EbayCompResponse = {
-      averageComp: medianComp,
+      averageComp,
       medianComp,
-      lowestComp: prices.length ? Math.min(...prices) : 0,
-      highestComp: prices.length ? Math.max(...prices) : 0,
-      recentSales: weightedRecentSales,
+      lowestComp,
+      highestComp,
+      recentSales,
       listings: sortedListings.slice(0, 8),
       compCount: prices.length,
       soldOnly: true,
@@ -147,7 +148,7 @@ Deno.serve(async (req: Request) => {
   }
 });
 
-async function getAppToken(): Promise<string> {
+function getAppId(): string {
   const EBAY_APP_ID = Deno.env.get("App ID");
   const EBAY_DEV_ID = Deno.env.get("Dev ID");
   const EBAY_CERT_ID = Deno.env.get("Cert ID");
@@ -160,34 +161,7 @@ async function getAppToken(): Promise<string> {
     throw new Error("Missing eBay secrets from Supabase environment variables");
   }
 
-  const basicToken = btoa(`${EBAY_APP_ID}:${EBAY_CERT_ID}`);
-  const body = new URLSearchParams({
-    grant_type: "client_credentials",
-    scope: "https://api.ebay.com/oauth/api_scope",
-  });
-
-  const tokenResp = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${basicToken}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body,
-  });
-
-  if (!tokenResp.ok) {
-    const errText = await tokenResp.text();
-    console.error("OAuth token request failed", tokenResp.status, errText);
-    throw new Error("Failed to generate eBay app token");
-  }
-
-  const tokenData = await tokenResp.json();
-  const token = String(tokenData?.access_token ?? "");
-  if (!token) {
-    throw new Error("Missing access_token in OAuth response");
-  }
-
-  return token;
+  return EBAY_APP_ID;
 }
 
 function hasBlockedKeyword(title: string): boolean {
@@ -200,11 +174,10 @@ function hasSpamKeyword(title: string): boolean {
   return SPAM_KEYWORDS.some((keyword) => lower.includes(keyword));
 }
 
-function isSoldItem(item: any): boolean {
-  if (item?.itemEndDate && String(item.itemEndDate).length > 0) return true;
-  return false;
+function average(values: number[]): number {
+  if (!values.length) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
-
 
 function median(values: number[]): number {
   if (!values.length) return 0;
