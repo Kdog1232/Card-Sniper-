@@ -15,11 +15,13 @@ type CompRequest = {
 };
 
 type EbayListing = {
+  itemId?: string;
   title: string;
   price: number;
   image: string;
   url: string;
   soldAt?: string;
+  format?: "auction" | "buy_it_now" | "unknown";
 };
 
 type EbayCompResponse = {
@@ -31,6 +33,14 @@ type EbayCompResponse = {
   listings: EbayListing[];
   compCount: number;
   confidence: "low" | "medium" | "high";
+  confidenceScore: number;
+  compQuality: "weak" | "fair" | "strong";
+  trend: "up" | "down" | "stable" | "unknown";
+  liquidity: "weak" | "moderate" | "strong";
+  auctionCount: number;
+  buyItNowCount: number;
+  gradedCount: number;
+  rawCount: number;
   soldOnly: true;
 };
 
@@ -72,45 +82,25 @@ Deno.serve(async (req: Request) => {
     }
 
     const appId = getAppId();
-    const searchUrl = new URL("https://svcs.ebay.com/services/search/FindingService/v1");
-    searchUrl.searchParams.set("OPERATION-NAME", "findCompletedItems");
-    searchUrl.searchParams.set("SERVICE-VERSION", "1.13.0");
-    searchUrl.searchParams.set("SECURITY-APPNAME", appId);
-    searchUrl.searchParams.set("RESPONSE-DATA-FORMAT", "JSON");
-    searchUrl.searchParams.set("REST-PAYLOAD", "");
-    searchUrl.searchParams.set("keywords", normalized.searchKeywords);
-    searchUrl.searchParams.set("paginationInput.entriesPerPage", "50");
-    searchUrl.searchParams.set("itemFilter(0).name", "SoldItemsOnly");
-    searchUrl.searchParams.set("itemFilter(0).value", "true");
-    searchUrl.searchParams.set("sortOrder", "EndTimeSoonest");
-
     console.log("Using SOLD listings endpoint");
-    console.log("Search query:", normalized.searchKeywords);
-
-    const ebayResp = await fetch(searchUrl.toString());
-    console.log("eBay response status:", ebayResp.status);
-
-    if (!ebayResp.ok) {
-      const errText = await ebayResp.text();
-      console.error("Completed items API failed", ebayResp.status, errText);
-      return jsonResponse({ error: "Failed to fetch eBay comps." }, 502);
-    }
-
-    const ebayData = await ebayResp.json();
-    const items = ebayData?.findCompletedItemsResponse?.[0]?.searchResult?.[0]?.item ?? [];
-    console.log("Sold items returned:", Array.isArray(items) ? items.length : 0);
+    console.log("Search queries:", normalized.queryVariants);
+    const items = await fetchCompletedItems(appId, normalized.queryVariants);
+    console.log("Sold items returned:", items.length);
     const detectedGrading = detectGradingProfile(body, query);
 
     const soldListings = (Array.isArray(items) ? items : [])
       .map((item: any) => {
         const title = String(item?.title?.[0] ?? "").trim();
+        const itemId = String(item?.itemId?.[0] ?? "");
         const price = Number(item?.sellingStatus?.[0]?.currentPrice?.[0]?.__value__);
         const image = String(item?.galleryURL?.[0] ?? "");
         const url = String(item?.viewItemURL?.[0] ?? "");
         const soldAt = String(item?.listingInfo?.[0]?.endTime?.[0] ?? "");
         const sold = String(item?.sellingStatus?.[0]?.sellingState?.[0] ?? "") === "EndedWithSales";
+        const listingType = String(item?.listingInfo?.[0]?.listingType?.[0] ?? "").toLowerCase();
+        const format = listingType.includes("auction") ? "auction" : listingType.includes("fixed") ? "buy_it_now" : "unknown";
 
-        return { title, price, image, url, soldAt, sold };
+        return { itemId, title, price, image, url, soldAt, sold, format };
       })
       .filter((item: any) => item.sold)
       .filter((item: any) => item.title && Number.isFinite(item.price) && item.price > 0 && item.url)
@@ -139,6 +129,11 @@ Deno.serve(async (req: Request) => {
     const highestComp = prices.length ? Math.max(...prices) : 0;
     console.log("Median sold price:", medianComp);
 
+    const auctionCount = sortedListings.filter((x) => x.format === "auction").length;
+    const buyItNowCount = sortedListings.filter((x) => x.format === "buy_it_now").length;
+    const gradedCount = sortedListings.filter((x) => looksGraded(x.title)).length;
+    const rawCount = Math.max(0, sortedListings.length - gradedCount);
+    const confidenceScore = computeConfidenceScore(prices, sortedListings);
     const response: EbayCompResponse = {
       averageComp,
       medianComp,
@@ -147,7 +142,15 @@ Deno.serve(async (req: Request) => {
       recentSales,
       listings: sortedListings.slice(0, 8),
       compCount: prices.length,
-      confidence: prices.length < 3 ? "low" : prices.length < 8 ? "medium" : "high",
+      confidence: confidenceScore < 40 ? "low" : confidenceScore < 72 ? "medium" : "high",
+      confidenceScore,
+      compQuality: prices.length < 3 ? "weak" : prices.length < 7 ? "fair" : "strong",
+      trend: computeTrend(recentSales),
+      liquidity: prices.length >= 10 ? "strong" : prices.length >= 5 ? "moderate" : "weak",
+      auctionCount,
+      buyItNowCount,
+      gradedCount,
+      rawCount,
       soldOnly: true,
     };
 
@@ -259,7 +262,7 @@ function buildNormalizedSearchTerms(body: CompRequest) {
   const year = String(body.year ?? "").trim();
   const set = String(body.set ?? "").trim();
   const variation = String(body.variation ?? "").trim();
-  const cardNumber = extractCardNumber(variation);
+  const cardNumber = String(body.cardNumber ?? "").trim() || extractCardNumber(variation);
   const rookieHint = /\b(rookie|rc|draft pick)\b/i.test(`${set} ${variation}`) ? "rookie rc" : "";
 
   const primary = [player, year, set, variation].filter(Boolean).join(" ");
@@ -267,14 +270,15 @@ function buildNormalizedSearchTerms(body: CompRequest) {
   const v1 = [player, set, rookieHint].filter(Boolean).join(" ");
   const v2 = [year, set, player, cardNumber ? `#${cardNumber}` : ""].filter(Boolean).join(" ");
   const v3 = [player, "RC", set].filter(Boolean).join(" ");
-  const searchKeywords = [primary, v1, v2, v3, variationWithoutNoise].filter(Boolean).join(" OR ");
+  const queryVariants = [primary, v1, v2, v3, variationWithoutNoise].filter(Boolean);
+  const searchKeywords = queryVariants.join(" OR ");
   const tokens = [player, year, set, variationWithoutNoise, cardNumber ? `#${cardNumber}` : ""]
     .join(" ")
     .toLowerCase()
     .split(/[^a-z0-9#]+/)
     .filter((token) => token.length > 1);
 
-  return { primary, searchKeywords, tokens };
+  return { primary, searchKeywords, tokens, queryVariants };
 }
 
 function detectGradingProfile(body: CompRequest, query: string) {
@@ -288,7 +292,7 @@ function detectGradingProfile(body: CompRequest, query: string) {
     player: String(body.player ?? "").trim(),
     year: String(body.year ?? "").trim(),
     set: String(body.set ?? "").trim(),
-    cardNumber: extractCardNumber(String(body.variation ?? "")),
+    cardNumber: String(body.cardNumber ?? "").trim() || extractCardNumber(String(body.variation ?? "")),
   };
 }
 
@@ -328,4 +332,55 @@ function jsonResponse(data: unknown, status = 200) {
       "Content-Type": "application/json",
     },
   });
+}
+
+async function fetchCompletedItems(appId: string, queries: string[]): Promise<any[]> {
+  const unique = new Map<string, any>();
+  for (const query of queries.slice(0, 5)) {
+    const searchUrl = new URL("https://svcs.ebay.com/services/search/FindingService/v1");
+    searchUrl.searchParams.set("OPERATION-NAME", "findCompletedItems");
+    searchUrl.searchParams.set("SERVICE-VERSION", "1.13.0");
+    searchUrl.searchParams.set("SECURITY-APPNAME", appId);
+    searchUrl.searchParams.set("RESPONSE-DATA-FORMAT", "JSON");
+    searchUrl.searchParams.set("REST-PAYLOAD", "");
+    searchUrl.searchParams.set("keywords", query);
+    searchUrl.searchParams.set("paginationInput.entriesPerPage", "50");
+    searchUrl.searchParams.set("itemFilter(0).name", "SoldItemsOnly");
+    searchUrl.searchParams.set("itemFilter(0).value", "true");
+    searchUrl.searchParams.set("sortOrder", "EndTimeSoonest");
+
+    const ebayResp = await fetch(searchUrl.toString());
+    if (!ebayResp.ok) continue;
+    const ebayData = await ebayResp.json();
+    const items = ebayData?.findCompletedItemsResponse?.[0]?.searchResult?.[0]?.item ?? [];
+    for (const item of Array.isArray(items) ? items : []) {
+      const key = String(item?.itemId?.[0] ?? item?.viewItemURL?.[0] ?? Math.random());
+      if (!unique.has(key)) unique.set(key, item);
+    }
+  }
+  return [...unique.values()];
+}
+
+function computeConfidenceScore(prices: number[], listings: EbayListing[]): number {
+  if (!prices.length) return 0;
+  const depthScore = Math.min(45, prices.length * 6);
+  const maxAgePenalty = listings.slice(0, 10).reduce((penalty, item) => {
+    if (!item.soldAt) return penalty + 5;
+    const days = (Date.now() - new Date(item.soldAt).getTime()) / 86400000;
+    return penalty + Math.min(4, Math.max(0, days / 30));
+  }, 0);
+  const variability = median(prices) ? (Math.max(...prices) - Math.min(...prices)) / median(prices) : 2;
+  const stabilityBonus = Math.max(0, 35 - variability * 20);
+  return Math.max(0, Math.min(100, Math.round(depthScore + stabilityBonus - maxAgePenalty)));
+}
+
+function computeTrend(recentSales: number[]): "up" | "down" | "stable" | "unknown" {
+  if (recentSales.length < 4) return "unknown";
+  const half = Math.floor(recentSales.length / 2);
+  const older = average(recentSales.slice(0, half));
+  const newer = average(recentSales.slice(half));
+  const delta = (newer - older) / Math.max(older, 1);
+  if (delta > 0.08) return "up";
+  if (delta < -0.08) return "down";
+  return "stable";
 }
