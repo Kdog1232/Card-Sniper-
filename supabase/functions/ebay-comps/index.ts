@@ -19,14 +19,32 @@ type EbayListing = {
 
 type EbayCompResponse = {
   averageComp: number;
+  medianComp: number;
   lowestComp: number;
   highestComp: number;
   recentSales: number[];
   listings: EbayListing[];
   compCount: number;
+  soldOnly: true;
 };
 
 const BLOCKED_KEYWORDS = ["pack", "packs", "lot", "lots", "reprint", "custom", "digital", "epack", "e-pack"];
+const SPAM_KEYWORDS = ["gem mint", "investment", "🔥", "hot", "rare!!", "1/1", "one of one"];
+const GRADED_KEYWORDS = [
+  "psa",
+  "bgs",
+  "sgc",
+  "cgc",
+  "hga",
+  "beckett",
+  "gem mint",
+  "mint 9",
+  "mint 10",
+  "pristine",
+  "slab",
+  "graded",
+  "authentic",
+];
 
 console.log("Using eBay PRODUCTION environment");
 
@@ -48,6 +66,7 @@ Deno.serve(async (req: Request) => {
     const searchUrl = new URL("https://api.ebay.com/buy/browse/v1/item_summary/search");
     searchUrl.searchParams.set("q", query);
     searchUrl.searchParams.set("limit", "30");
+    searchUrl.searchParams.set("filter", "soldItemsOnly:true");
     console.log("Search query:", query);
     console.log("eBay request URL:", searchUrl.toString());
 
@@ -69,26 +88,53 @@ Deno.serve(async (req: Request) => {
     console.log("eBay raw data:", JSON.stringify(ebayData));
     const itemSummaries = Array.isArray(ebayData?.itemSummaries) ? ebayData.itemSummaries : [];
     console.log("Items found:", itemSummaries.length);
-    const cleanListings = itemSummaries
+    const scannedCardLooksGraded = looksGraded(query);
+
+    const soldListings = itemSummaries
       .map((item: any) => {
         const title = String(item?.title ?? "").trim();
         const price = Number(item?.price?.value);
         const image = String(item?.image?.imageUrl ?? "");
         const url = String(item?.itemWebUrl ?? "");
+        const sold = isSoldItem(item);
+        const itemEndDate = String(item?.itemEndDate ?? "");
 
-        return { title, price, image, url };
+        return { title, price, image, url, sold, itemEndDate };
       })
-      .filter((item: EbayListing) => item.title && Number.isFinite(item.price) && item.price > 0 && item.url)
-      .filter((item: EbayListing) => !hasBlockedKeyword(item.title));
+      .filter((item: any) => item.sold)
+      .filter((item: any) => item.title && Number.isFinite(item.price) && item.price > 0 && item.url)
+      .filter((item: any) => !hasBlockedKeyword(item.title) && !hasSpamKeyword(item.title));
+    console.log("Sold comps found:", soldListings.length);
 
-    const prices = cleanListings.map((item: EbayListing) => item.price);
+    const filteredByCondition = soldListings
+      .filter((item: any) => scannedCardLooksGraded || !looksGraded(item.title));
+    console.log("Filtered comps removed:", soldListings.length - filteredByCondition.length);
+
+    const scoredListings = filteredByCondition
+      .map((item: EbayListing, index: number) => ({
+        ...item,
+        score: compRelevanceScore(item.title, query, scannedCardLooksGraded, index),
+      }))
+      .sort((a, b) => b.score - a.score);
+
+    const sortedListings = scoredListings.map(({ score: _score, sold: _sold, itemEndDate: _itemEndDate, ...listing }) => listing);
+    const rawPrices = sortedListings.map((item: EbayListing) => item.price);
+    const prices = excludeOutlierPrices(rawPrices);
+
+    const weightedRecentSales = prices.slice(0, 10);
+
+    const medianComp = median(prices);
+    console.log("Final median price used:", medianComp);
+
     const response: EbayCompResponse = {
-      averageComp: average(prices),
+      averageComp: medianComp,
+      medianComp,
       lowestComp: prices.length ? Math.min(...prices) : 0,
       highestComp: prices.length ? Math.max(...prices) : 0,
-      recentSales: prices.slice(0, 10),
-      listings: cleanListings.slice(0, 8),
+      recentSales: weightedRecentSales,
+      listings: sortedListings.slice(0, 8),
       compCount: prices.length,
+      soldOnly: true,
     };
 
     return jsonResponse(response, 200);
@@ -149,9 +195,73 @@ function hasBlockedKeyword(title: string): boolean {
   return BLOCKED_KEYWORDS.some((keyword) => lower.includes(keyword));
 }
 
-function average(values: number[]): number {
+function hasSpamKeyword(title: string): boolean {
+  const lower = title.toLowerCase();
+  return SPAM_KEYWORDS.some((keyword) => lower.includes(keyword));
+}
+
+function isSoldItem(item: any): boolean {
+  if (item?.itemEndDate && String(item.itemEndDate).length > 0) return true;
+  return false;
+}
+
+
+function median(values: number[]): number {
   if (!values.length) return 0;
-  return values.reduce((sum, value) => sum + value, 0) / values.length;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    return (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+  return sorted[mid];
+}
+
+function looksGraded(text: string): boolean {
+  const lower = text.toLowerCase();
+  if (GRADED_KEYWORDS.some((keyword) => lower.includes(keyword))) return true;
+  return /\b(psa|bgs|sgc|cgc|hga)\s?\d{1,2}(\.5)?\b/i.test(text);
+}
+
+function compRelevanceScore(title: string, query: string, scannedCardLooksGraded: boolean, index: number): number {
+  const lowerTitle = title.toLowerCase();
+  const queryTokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const tokenMatches = queryTokens.filter((token) => lowerTitle.includes(token)).length;
+
+  let score = tokenMatches * 10;
+
+  const listingLooksGraded = looksGraded(title);
+  if (scannedCardLooksGraded === listingLooksGraded) score += 25;
+  else score -= 50;
+
+  if (!scannedCardLooksGraded && (lowerTitle.includes("raw") || lowerTitle.includes("ungraded"))) score += 15;
+  if (scannedCardLooksGraded && lowerTitle.includes("graded")) score += 15;
+
+  score += Math.max(0, 12 - index);
+  return score;
+}
+
+function excludeOutlierPrices(values: number[]): number[] {
+  if (values.length < 4) return values;
+  const sorted = [...values].sort((a, b) => a - b);
+  const q1 = quantile(sorted, 0.25);
+  const q3 = quantile(sorted, 0.75);
+  const iqr = q3 - q1;
+  const lowFence = q1 - 1.5 * iqr;
+  const highFence = q3 + 1.5 * iqr;
+
+  const filtered = values.filter((value) => value >= lowFence && value <= highFence);
+  return filtered.length ? filtered : values;
+}
+
+function quantile(sortedValues: number[], q: number): number {
+  if (!sortedValues.length) return 0;
+  const pos = (sortedValues.length - 1) * q;
+  const base = Math.floor(pos);
+  const rest = pos - base;
+  if (sortedValues[base + 1] !== undefined) {
+    return sortedValues[base] + rest * (sortedValues[base + 1] - sortedValues[base]);
+  }
+  return sortedValues[base];
 }
 
 function jsonResponse(data: unknown, status = 200) {
