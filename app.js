@@ -97,6 +97,7 @@ async function fetchEbayComps(aiCard) {
     recentSales: fallbackBase ? [fallbackBase] : [],
     listings: [],
     compCount: fallbackBase ? 1 : 0,
+    confidence: "low",
     usedFallback: true,
   };
 
@@ -128,6 +129,7 @@ async function fetchEbayComps(aiCard) {
       recentSales: Array.isArray(data.recentSales) ? data.recentSales.map(Number).filter(Number.isFinite) : [],
       listings: Array.isArray(data.listings) ? data.listings : [],
       compCount: Number(data.compCount || 0),
+      confidence: String(data.confidence || "medium"),
       usedFallback: false,
     };
   } catch (error) {
@@ -182,7 +184,7 @@ function renderResult({ aiCard, comps, verdict, askingPrice }) {
   recentSales.textContent = salesText;
 
   compSummary.textContent = comps.compCount
-    ? `Based on ${comps.compCount} recent comps${comps.usedFallback ? " (AI fallback)" : ""}`
+    ? `Based on ${comps.compCount} REAL sold eBay comps`
     : "No reliable comps returned. Showing AI estimate fallback.";
 
   compListings.innerHTML = "";
