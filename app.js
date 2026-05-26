@@ -57,16 +57,16 @@ scanBtn.addEventListener("click", async () => {
   }
 });
 
-const SUPABASE_FUNCTION_URL = (window.SUPABASE_FUNCTION_URL || "").replace(/\/$/, "");
-const SUPABASE_EBAY_COMPS_URL = (window.SUPABASE_EBAY_COMPS_URL || "").replace(/\/$/, "");
+const SCAN_FUNCTION_URL = (window.SUPABASE_FUNCTION_URL || "").replace(/\/$/, "");
+const EBAY_COMPS_FUNCTION_URL = (window.EBAY_COMPS_FUNCTION_URL || "").replace(/\/$/, "");
 const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || "";
 
 async function analyzeCardWithOpenAI(base64Image, askingPrice) {
-  if (!SUPABASE_FUNCTION_URL || !SUPABASE_ANON_KEY) {
+  if (!SCAN_FUNCTION_URL || !SUPABASE_ANON_KEY) {
     throw new Error("Missing Supabase config. Set window.SUPABASE_FUNCTION_URL and window.SUPABASE_ANON_KEY.");
   }
 
-  const response = await fetch(SUPABASE_FUNCTION_URL, {
+  const response = await fetch(SCAN_FUNCTION_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -100,10 +100,10 @@ async function fetchEbayComps(aiCard) {
     usedFallback: true,
   };
 
-  if (!SUPABASE_EBAY_COMPS_URL || !SUPABASE_ANON_KEY) return fallback;
+  if (!EBAY_COMPS_FUNCTION_URL || !SUPABASE_ANON_KEY) return fallback;
 
   try {
-    const response = await fetch(SUPABASE_EBAY_COMPS_URL, {
+    const response = await fetch(EBAY_COMPS_FUNCTION_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
