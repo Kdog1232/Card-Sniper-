@@ -8,6 +8,10 @@ type CompRequest = {
   year?: string;
   set?: string;
   variation?: string;
+  cardNumber?: string;
+  isGraded?: boolean;
+  gradingCompany?: string;
+  grade?: string;
 };
 
 type EbayListing = {
@@ -15,6 +19,7 @@ type EbayListing = {
   price: number;
   image: string;
   url: string;
+  soldAt?: string;
 };
 
 type EbayCompResponse = {
@@ -25,6 +30,7 @@ type EbayCompResponse = {
   recentSales: number[];
   listings: EbayListing[];
   compCount: number;
+  confidence: "low" | "medium" | "high";
   soldOnly: true;
 };
 
@@ -44,7 +50,11 @@ const GRADED_KEYWORDS = [
   "slab",
   "graded",
   "authentic",
+  "gem",
+  "black label",
+  "auto 10",
 ];
+const RAW_EXCLUDE_KEYWORDS = ["psa", "bgs", "sgc", "cgc", "gem", "mint 9", "mint 10", "auto 10", "pristine", "black label"];
 
 console.log("Using eBay PRODUCTION environment");
 
@@ -54,7 +64,8 @@ Deno.serve(async (req: Request) => {
 
   try {
     const body = (await req.json()) as CompRequest;
-    const query = [body.player, body.year, body.set, body.variation].map((s) => String(s ?? "").trim()).filter(Boolean).join(" ");
+    const normalized = buildNormalizedSearchTerms(body);
+    const query = normalized.primary;
 
     if (!query) {
       return jsonResponse({ error: "Missing card metadata for comp search." }, 400);
@@ -67,14 +78,14 @@ Deno.serve(async (req: Request) => {
     searchUrl.searchParams.set("SECURITY-APPNAME", appId);
     searchUrl.searchParams.set("RESPONSE-DATA-FORMAT", "JSON");
     searchUrl.searchParams.set("REST-PAYLOAD", "");
-    searchUrl.searchParams.set("keywords", query);
+    searchUrl.searchParams.set("keywords", normalized.searchKeywords);
     searchUrl.searchParams.set("paginationInput.entriesPerPage", "50");
     searchUrl.searchParams.set("itemFilter(0).name", "SoldItemsOnly");
     searchUrl.searchParams.set("itemFilter(0).value", "true");
     searchUrl.searchParams.set("sortOrder", "EndTimeSoonest");
 
     console.log("Using SOLD listings endpoint");
-    console.log("Search query:", query);
+    console.log("Search query:", normalized.searchKeywords);
 
     const ebayResp = await fetch(searchUrl.toString());
     console.log("eBay response status:", ebayResp.status);
@@ -88,7 +99,7 @@ Deno.serve(async (req: Request) => {
     const ebayData = await ebayResp.json();
     const items = ebayData?.findCompletedItemsResponse?.[0]?.searchResult?.[0]?.item ?? [];
     console.log("Sold items returned:", Array.isArray(items) ? items.length : 0);
-    const scannedCardLooksGraded = looksGraded(query);
+    const detectedGrading = detectGradingProfile(body, query);
 
     const soldListings = (Array.isArray(items) ? items : [])
       .map((item: any) => {
@@ -96,27 +107,28 @@ Deno.serve(async (req: Request) => {
         const price = Number(item?.sellingStatus?.[0]?.currentPrice?.[0]?.__value__);
         const image = String(item?.galleryURL?.[0] ?? "");
         const url = String(item?.viewItemURL?.[0] ?? "");
+        const soldAt = String(item?.listingInfo?.[0]?.endTime?.[0] ?? "");
         const sold = String(item?.sellingStatus?.[0]?.sellingState?.[0] ?? "") === "EndedWithSales";
 
-        return { title, price, image, url, sold };
+        return { title, price, image, url, soldAt, sold };
       })
       .filter((item: any) => item.sold)
       .filter((item: any) => item.title && Number.isFinite(item.price) && item.price > 0 && item.url)
       .filter((item: any) => !hasBlockedKeyword(item.title) && !hasSpamKeyword(item.title));
     console.log("Sold comps found:", soldListings.length);
 
-    const filteredByCondition = soldListings
-      .filter((item: any) => scannedCardLooksGraded || !looksGraded(item.title));
-    console.log("Filtered comps removed:", soldListings.length - filteredByCondition.length);
+    const { filtered, rawCount, gradedRemoved } = filterByConditionAndGrade(soldListings, detectedGrading);
+    console.log("Raw comps kept:", rawCount);
+    console.log("Graded comps removed:", gradedRemoved);
 
-    const scoredListings = filteredByCondition
+    const scoredListings = filtered
       .map((item: EbayListing, index: number) => ({
         ...item,
-        score: compRelevanceScore(item.title, query, scannedCardLooksGraded, index),
+        score: compRelevanceScore(item, normalized, detectedGrading, index),
       }))
       .sort((a, b) => b.score - a.score);
 
-    const sortedListings = scoredListings.map(({ score: _score, sold: _sold, ...listing }) => listing);
+    const sortedListings = scoredListings.map(({ score: _score, sold: _sold, ...listing }) => listing).slice(0, 50);
     const rawPrices = sortedListings.map((item: EbayListing) => item.price);
     const prices = excludeOutlierPrices(rawPrices);
 
@@ -125,7 +137,7 @@ Deno.serve(async (req: Request) => {
     const medianComp = median(prices);
     const lowestComp = prices.length ? Math.min(...prices) : 0;
     const highestComp = prices.length ? Math.max(...prices) : 0;
-    console.log("Final median price used:", medianComp);
+    console.log("Median sold price:", medianComp);
 
     const response: EbayCompResponse = {
       averageComp,
@@ -135,6 +147,7 @@ Deno.serve(async (req: Request) => {
       recentSales,
       listings: sortedListings.slice(0, 8),
       compCount: prices.length,
+      confidence: prices.length < 3 ? "low" : prices.length < 8 ? "medium" : "high",
       soldOnly: true,
     };
 
@@ -195,46 +208,116 @@ function looksGraded(text: string): boolean {
   return /\b(psa|bgs|sgc|cgc|hga)\s?\d{1,2}(\.5)?\b/i.test(text);
 }
 
-function compRelevanceScore(title: string, query: string, scannedCardLooksGraded: boolean, index: number): number {
+function compRelevanceScore(
+  listing: EbayListing,
+  normalized: ReturnType<typeof buildNormalizedSearchTerms>,
+  grading: ReturnType<typeof detectGradingProfile>,
+  index: number,
+): number {
+  const title = listing.title;
   const lowerTitle = title.toLowerCase();
-  const queryTokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const queryTokens = normalized.tokens;
   const tokenMatches = queryTokens.filter((token) => lowerTitle.includes(token)).length;
 
   let score = tokenMatches * 10;
 
   const listingLooksGraded = looksGraded(title);
-  if (scannedCardLooksGraded === listingLooksGraded) score += 25;
+  if (grading.isGraded === listingLooksGraded) score += 25;
   else score -= 50;
 
-  if (!scannedCardLooksGraded && (lowerTitle.includes("raw") || lowerTitle.includes("ungraded"))) score += 15;
-  if (scannedCardLooksGraded && lowerTitle.includes("graded")) score += 15;
+  if (!grading.isGraded && (lowerTitle.includes("raw") || lowerTitle.includes("ungraded"))) score += 15;
+  if (grading.isGraded && lowerTitle.includes("graded")) score += 15;
+  if (grading.cardNumber && lowerTitle.includes(`#${grading.cardNumber.toLowerCase()}`)) score += 20;
+  if (grading.year && lowerTitle.includes(grading.year.toLowerCase())) score += 10;
+  if (grading.player && lowerTitle.includes(grading.player.toLowerCase())) score += 15;
+  if (grading.set && lowerTitle.includes(grading.set.toLowerCase())) score += 15;
+  if (grading.isGraded && grading.company && lowerTitle.includes(grading.company.toLowerCase())) score += 20;
+  if (grading.isGraded && grading.grade && lowerTitle.includes(grading.grade.toLowerCase())) score += 12;
+  if (lowerTitle.includes(" rc ") || lowerTitle.includes(" rookie")) score += 5;
+  if (listing.image) score += 8;
+  if (listing.soldAt) {
+    const soldTime = new Date(listing.soldAt).getTime();
+    const ageDays = Number.isFinite(soldTime) ? (Date.now() - soldTime) / (1000 * 60 * 60 * 24) : 365;
+    score += Math.max(0, 20 - ageDays / 4);
+  }
 
   score += Math.max(0, 12 - index);
   return score;
 }
 
 function excludeOutlierPrices(values: number[]): number[] {
-  if (values.length < 4) return values;
-  const sorted = [...values].sort((a, b) => a - b);
-  const q1 = quantile(sorted, 0.25);
-  const q3 = quantile(sorted, 0.75);
-  const iqr = q3 - q1;
-  const lowFence = q1 - 1.5 * iqr;
-  const highFence = q3 + 1.5 * iqr;
-
+  if (values.length < 3) return values;
+  const med = median(values);
+  const lowFence = med * 0.4;
+  const highFence = med * 2.5;
   const filtered = values.filter((value) => value >= lowFence && value <= highFence);
   return filtered.length ? filtered : values;
 }
 
-function quantile(sortedValues: number[], q: number): number {
-  if (!sortedValues.length) return 0;
-  const pos = (sortedValues.length - 1) * q;
-  const base = Math.floor(pos);
-  const rest = pos - base;
-  if (sortedValues[base + 1] !== undefined) {
-    return sortedValues[base] + rest * (sortedValues[base + 1] - sortedValues[base]);
-  }
-  return sortedValues[base];
+function buildNormalizedSearchTerms(body: CompRequest) {
+  const player = String(body.player ?? "").trim();
+  const year = String(body.year ?? "").trim();
+  const set = String(body.set ?? "").trim();
+  const variation = String(body.variation ?? "").trim();
+  const cardNumber = extractCardNumber(variation);
+  const rookieHint = /\b(rookie|rc|draft pick)\b/i.test(`${set} ${variation}`) ? "rookie rc" : "";
+
+  const primary = [player, year, set, variation].filter(Boolean).join(" ");
+  const variationWithoutNoise = variation.replace(/draft pick/gi, "").trim();
+  const v1 = [player, set, rookieHint].filter(Boolean).join(" ");
+  const v2 = [year, set, player, cardNumber ? `#${cardNumber}` : ""].filter(Boolean).join(" ");
+  const v3 = [player, "RC", set].filter(Boolean).join(" ");
+  const searchKeywords = [primary, v1, v2, v3, variationWithoutNoise].filter(Boolean).join(" OR ");
+  const tokens = [player, year, set, variationWithoutNoise, cardNumber ? `#${cardNumber}` : ""]
+    .join(" ")
+    .toLowerCase()
+    .split(/[^a-z0-9#]+/)
+    .filter((token) => token.length > 1);
+
+  return { primary, searchKeywords, tokens };
+}
+
+function detectGradingProfile(body: CompRequest, query: string) {
+  const source = [query, body.gradingCompany, body.grade].filter(Boolean).join(" ");
+  const companyMatch = source.match(/\b(psa|bgs|sgc|cgc|hga|beckett)\b/i);
+  const gradeMatch = source.match(/\b(10|9(?:\.5)?|8(?:\.5)?|7(?:\.5)?|gem mint 10|mint 9|pristine 10|black label)\b/i);
+  return {
+    isGraded: typeof body.isGraded === "boolean" ? body.isGraded : looksGraded(source),
+    company: companyMatch?.[1]?.toUpperCase() ?? "",
+    grade: gradeMatch?.[1] ?? "",
+    player: String(body.player ?? "").trim(),
+    year: String(body.year ?? "").trim(),
+    set: String(body.set ?? "").trim(),
+    cardNumber: extractCardNumber(String(body.variation ?? "")),
+  };
+}
+
+function filterByConditionAndGrade(listings: any[], grading: ReturnType<typeof detectGradingProfile>) {
+  let rawCount = 0;
+  let gradedRemoved = 0;
+  const filtered = listings.filter((item) => {
+    const title = String(item.title ?? "");
+    const lower = title.toLowerCase();
+    if (!grading.isGraded) {
+      const blocked = RAW_EXCLUDE_KEYWORDS.some((keyword) => lower.includes(keyword));
+      if (blocked || looksGraded(title)) {
+        gradedRemoved += 1;
+        return false;
+      }
+      rawCount += 1;
+      return true;
+    }
+    if (!looksGraded(title)) return false;
+    if (grading.company && !lower.includes(grading.company.toLowerCase())) return false;
+    if (grading.grade && !lower.includes(grading.grade.toLowerCase())) return false;
+    return true;
+  });
+  return { filtered, rawCount, gradedRemoved };
+}
+
+function extractCardNumber(text: string): string {
+  const match = text.match(/#?\s?([a-z]?\d{1,4})\b/i);
+  return match?.[1] ?? "";
 }
 
 function jsonResponse(data: unknown, status = 200) {
