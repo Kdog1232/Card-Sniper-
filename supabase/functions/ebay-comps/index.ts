@@ -28,6 +28,8 @@ type EbayCompResponse = {
 
 const BLOCKED_KEYWORDS = ["pack", "packs", "lot", "lots", "reprint", "custom", "digital", "epack", "e-pack"];
 
+console.log("Using eBay PRODUCTION environment");
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return jsonResponse({ error: "Method not allowed" }, 405);
@@ -43,7 +45,7 @@ Deno.serve(async (req: Request) => {
     const token = await getAppToken();
     console.log("eBay token generated");
 
-    const searchUrl = new URL("https://api.sandbox.ebay.com/buy/browse/v1/item_summary/search");
+    const searchUrl = new URL("https://api.ebay.com/buy/browse/v1/item_summary/search");
     searchUrl.searchParams.set("q", query);
     searchUrl.searchParams.set("limit", "30");
     console.log("Search query:", query);
@@ -118,7 +120,7 @@ async function getAppToken(): Promise<string> {
     scope: "https://api.ebay.com/oauth/api_scope",
   });
 
-  const tokenResp = await fetch("https://api.sandbox.ebay.com/identity/v1/oauth2/token", {
+  const tokenResp = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
     method: "POST",
     headers: {
       Authorization: `Basic ${basicToken}`,
