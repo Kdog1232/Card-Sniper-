@@ -41,9 +41,13 @@ Deno.serve(async (req: Request) => {
     }
 
     const token = await getAppToken();
+    console.log("eBay token generated");
+
     const searchUrl = new URL("https://api.sandbox.ebay.com/buy/browse/v1/item_summary/search");
     searchUrl.searchParams.set("q", query);
     searchUrl.searchParams.set("limit", "30");
+    console.log("Search query:", query);
+    console.log("eBay request URL:", searchUrl.toString());
 
     const ebayResp = await fetch(searchUrl.toString(), {
       headers: {
@@ -51,6 +55,7 @@ Deno.serve(async (req: Request) => {
         "Content-Type": "application/json",
       },
     });
+    console.log("eBay response status:", ebayResp.status);
 
     if (!ebayResp.ok) {
       const errText = await ebayResp.text();
@@ -59,7 +64,9 @@ Deno.serve(async (req: Request) => {
     }
 
     const ebayData = await ebayResp.json();
+    console.log("eBay raw data:", JSON.stringify(ebayData));
     const itemSummaries = Array.isArray(ebayData?.itemSummaries) ? ebayData.itemSummaries : [];
+    console.log("Items found:", itemSummaries.length);
     const cleanListings = itemSummaries
       .map((item: any) => {
         const title = String(item?.title ?? "").trim();
