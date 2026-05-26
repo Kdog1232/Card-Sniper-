@@ -85,19 +85,27 @@ Deno.serve(async (req: Request) => {
     return jsonResponse(response, 200);
   } catch (error) {
     console.error("ebay-comps failed", error);
+    if (error instanceof Error && error.message === "Missing eBay secrets from Supabase environment variables") {
+      return jsonResponse({ error: error.message }, 500);
+    }
     return jsonResponse({ error: "Internal server error." }, 500);
   }
 });
 
 async function getAppToken(): Promise<string> {
-  const clientId = Deno.env.get("EBAY_CLIENT_ID");
-  const clientSecret = Deno.env.get("EBAY_CLIENT_SECRET");
+  const EBAY_APP_ID = Deno.env.get("App ID");
+  const EBAY_DEV_ID = Deno.env.get("Dev ID");
+  const EBAY_CERT_ID = Deno.env.get("Cert ID");
 
-  if (!clientId || !clientSecret) {
-    throw new Error("Missing EBAY_CLIENT_ID or EBAY_CLIENT_SECRET");
+  console.log("EBAY_APP_ID exists:", !!EBAY_APP_ID);
+  console.log("EBAY_DEV_ID exists:", !!EBAY_DEV_ID);
+  console.log("EBAY_CERT_ID exists:", !!EBAY_CERT_ID);
+
+  if (!EBAY_APP_ID || !EBAY_DEV_ID || !EBAY_CERT_ID) {
+    throw new Error("Missing eBay secrets from Supabase environment variables");
   }
 
-  const basicToken = btoa(`${clientId}:${clientSecret}`);
+  const basicToken = btoa(`${EBAY_APP_ID}:${EBAY_CERT_ID}`);
   const body = new URLSearchParams({
     grant_type: "client_credentials",
     scope: "https://api.ebay.com/oauth/api_scope",
