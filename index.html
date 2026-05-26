@@ -10,6 +10,7 @@
     <header class="app-header">
       <h1>🎯 Card Sniper</h1>
       <p>Know if it’s a snipe instantly.</p>
+      <p class="recent-sales">AI-assisted estimates only • Not financial, investment, grading, or authentication advice.</p>
     </header>
 
     <main class="container">
@@ -48,6 +49,13 @@
             <p>Asking Price <strong id="askingValue">$0</strong></p>
             <p>Potential Profit <strong id="upsideValue">$0</strong></p>
             <p>PSA Upside <strong id="psaUpsideValue">$0</strong></p>
+            <p>Predicted Grade <strong id="predictedPsaGrade">Unknown</strong></p>
+            <p>Coin Score <strong id="coinScore">50</strong></p>
+            <p>PSA 9 Value <strong id="psa9Value">$0</strong></p>
+            <p>PSA 10 Value <strong id="psa10Value">$0</strong></p>
+            <p>Good Buy Under <strong id="goodBuyUnder">$0</strong></p>
+            <p>Strong Buy Under <strong id="strongBuyUnder">$0</strong></p>
+            <p>Avoid Above <strong id="avoidAbove">$0</strong></p>
           </div>
         </div>
 
@@ -55,9 +63,37 @@
 
         <p id="compSummary" class="comp-summary">Based on 0 recent comps</p>
         <p id="recentSales" class="recent-sales">Recent sold prices will appear here.</p>
+        <p id="marketMeta" class="recent-sales">Confidence and trend details will appear here.</p>
+        <p id="transparencyMeta" class="recent-sales">Data transparency details will appear here.</p>
+        <p id="gradingRecommendation" class="recent-sales">Grading recommendation will appear here.</p>
+        <p id="visualCondition" class="recent-sales">Visual condition details will appear here.</p>
         <div id="compListings" class="comp-listings"></div>
       </section>
+
+      <section class="panel" id="dashboardPanel">
+        <h3>Collection Dashboard</h3>
+        <p class="recent-sales">Total Collection Value: <strong id="totalCollectionValue">$0</strong></p>
+        <p class="recent-sales">Estimated PSA Upside: <strong id="totalPsaUpside">$0</strong></p>
+        <p class="recent-sales">Profit / Loss: <strong id="totalProfitLoss">$0</strong></p>
+        <p class="recent-sales">Biggest Potential Flip: <strong id="biggestFlip">None yet</strong></p>
+        <p class="recent-sales">Recently Scanned: <strong id="recentlyScanned">0 cards</strong></p>
+        <p class="recent-sales">Market Movers: <strong id="marketMovers">No data yet</strong></p>
+      </section>
     </main>
+    <footer class="app-header">
+      <p>
+        Card Sniper provides AI-assisted market estimates using recent public sales data. Values, grading projections, and buy recommendations are
+        estimates only and are for informational purposes only. No guarantee of resale value, grade outcome, or authenticity is provided. Users
+        assume all purchase, grading, and resale risk.
+      </p>
+      <details>
+        <summary>Terms of Service (Summary)</summary>
+        <p class="recent-sales">
+          By using Card Sniper, you agree results are estimates only, not professional appraisal/authentication, and not financial advice. Card
+          Sniper is not liable for losses, grading outcomes, purchase decisions, or resale outcomes.
+        </p>
+      </details>
+    </footer>
 
     <script>
       window.SUPABASE_PROJECT_URL = "https://yerwrbfqctpxfrycuhgv.supabase.co";
