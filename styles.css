@@ -145,3 +145,11 @@ input {
 .comp-item img { width: 58px; height: 58px; object-fit: cover; border-radius: 8px; background: #05070d; }
 .comp-title { margin: 0; font-size: .83rem; color: #e8edff; line-height: 1.25; }
 .comp-price { margin: .22rem 0 0; color: #97f5bb; font-weight: 700; }
+
+.mode-head h2 { margin: 0; }
+.mode-head p { margin: .25rem 0 .6rem; color: var(--muted); font-size: .9rem; }
+.toggle-group { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .35rem; }
+.toggle-group label { display:flex; gap:.35rem; align-items:center; justify-content:center; border:1px solid #34406a; border-radius:10px; padding:.45rem .3rem; font-size:.82rem; background:#0b1020; }
+.secondary-btn { margin-top: 1rem; background: linear-gradient(90deg,#334155,#1f2937); }
+.deep-panel { margin-top: .9rem; border-top: 1px solid #28304f; padding-top: .85rem; }
+.deep-panel h3 { margin:0 0 .25rem; }

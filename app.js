@@ -4,6 +4,13 @@ const uploadText = document.getElementById("uploadText");
 const askingInput = document.getElementById("askingPrice");
 const scanBtn = document.getElementById("scanBtn");
 const resultPanel = document.getElementById("resultPanel");
+const openDeepBtn = document.getElementById("openDeepBtn");
+const deepPanel = document.getElementById("deepPanel");
+const deepAnalyzeBtn = document.getElementById("deepAnalyzeBtn");
+const frontHdImageInput = document.getElementById("frontHdImage");
+const backHdImageInput = document.getElementById("backHdImage");
+const angleImageInput = document.getElementById("angleImage");
+const deepResult = document.getElementById("deepResult");
 
 const verdictBadge = document.getElementById("verdictBadge");
 const snipeScore = document.getElementById("snipeScore");
@@ -15,6 +22,7 @@ const upsideValue = document.getElementById("upsideValue");
 const psaUpsideValue = document.getElementById("psaUpsideValue");
 const predictedPsaGrade = document.getElementById("predictedPsaGrade");
 const coinScore = document.getElementById("coinScore");
+const gemProbability = document.getElementById("gemProbability");
 const psa9Value = document.getElementById("psa9Value");
 const psa10Value = document.getElementById("psa10Value");
 const goodBuyUnder = document.getElementById("goodBuyUnder");
@@ -54,6 +62,44 @@ fileInput.addEventListener("change", () => {
   reader.readAsDataURL(file);
 });
 
+openDeepBtn?.addEventListener("click", () => deepPanel.classList.toggle("hidden"));
+
+deepAnalyzeBtn?.addEventListener("click", async () => {
+  const front = frontHdImageInput?.files?.[0];
+  const back = backHdImageInput?.files?.[0];
+  if (!front || !back) {
+    alert("Upload front and back HD photos for deep grade analysis.");
+    return;
+  }
+
+  deepAnalyzeBtn.disabled = true;
+  deepAnalyzeBtn.textContent = "Analyzing...";
+  try {
+    const [frontBase64, backBase64, angleBase64] = await Promise.all([
+      fileToDataUrl(front),
+      fileToDataUrl(back),
+      angleImageInput?.files?.[0] ? fileToDataUrl(angleImageInput.files[0]) : Promise.resolve("")
+    ]);
+
+    const deepData = await analyzeCardWithOpenAI(frontBase64, Number(askingInput.value || 1), {
+      mode: "deep_grading",
+      backImage: backBase64,
+      angleImage: angleBase64 || undefined,
+      compType: getCompType(),
+    });
+
+    deepResult.textContent = `Deep Analysis: Centering L/R ${deepData.centeringLeftRight || "Unknown"}, T/B ${deepData.centeringTopBottom || "Unknown"} • Corners: ${deepData.cornerWear || "Unknown"} • Edges: ${deepData.edgeWear || "Unknown"} • Surface: ${deepData.surfaceScratches || "Unknown"} • Print Lines: ${deepData.printLines || "Unknown"}`;
+    gradingRecommendation.textContent = `Grading Recommendation: ${deepData.gradingRecommendation || "No recommendation returned."}`;
+    visualCondition.textContent = `Visual: L/R ${deepData.centeringLeftRight || "Unknown"} • T/B ${deepData.centeringTopBottom || "Unknown"} • Corners: ${deepData.cornerWear || "Unknown"} • Surface: ${deepData.surfaceScratches || "Unknown"}`;
+  } catch (err) {
+    console.error(err);
+    deepResult.textContent = `Deep analysis failed: ${err.message}`;
+  } finally {
+    deepAnalyzeBtn.disabled = false;
+    deepAnalyzeBtn.textContent = "Run Deep Grade Analysis";
+  }
+});
+
 scanBtn.addEventListener("click", async () => {
   const askingPrice = Number(askingInput.value);
   if (!imageDataUrl || !askingPrice || askingPrice <= 0) {
@@ -65,8 +111,8 @@ scanBtn.addEventListener("click", async () => {
   scanBtn.textContent = "Scanning...";
 
   try {
-    const aiCard = await analyzeCardWithOpenAI(imageDataUrl, askingPrice);
-    const comps = await fetchEbayComps(aiCard);
+    const aiCard = await analyzeCardWithOpenAI(imageDataUrl, askingPrice, { mode: "quick_scan", compType: getCompType() });
+    const comps = await fetchEbayComps(aiCard, getCompType());
     const verdict = scoreDeal(askingPrice, comps.averageComp);
     renderResult({ aiCard, comps, verdict, askingPrice });
   } catch (err) {
@@ -82,7 +128,7 @@ const SCAN_FUNCTION_URL = (window.SUPABASE_FUNCTION_URL || "").replace(/\/$/, ""
 const EBAY_COMPS_FUNCTION_URL = (window.EBAY_COMPS_FUNCTION_URL || "").replace(/\/$/, "");
 const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || "";
 
-async function analyzeCardWithOpenAI(base64Image, askingPrice) {
+async function analyzeCardWithOpenAI(base64Image, askingPrice, extraPayload = {}) {
   if (!SCAN_FUNCTION_URL || !SUPABASE_ANON_KEY) {
     throw new Error("Missing Supabase config. Set window.SUPABASE_FUNCTION_URL and window.SUPABASE_ANON_KEY.");
   }
@@ -97,6 +143,7 @@ async function analyzeCardWithOpenAI(base64Image, askingPrice) {
     body: JSON.stringify({
       image: base64Image,
       askingPrice,
+      ...extraPayload,
     }),
   });
 
@@ -109,8 +156,8 @@ async function analyzeCardWithOpenAI(base64Image, askingPrice) {
   return data;
 }
 
-async function fetchEbayComps(aiCard) {
-  const cacheKey = `${aiCard.player}|${aiCard.year}|${aiCard.set}|${aiCard.variation}|${aiCard.cardNumber || ""}`.toLowerCase();
+async function fetchEbayComps(aiCard, compType = "raw") {
+  const cacheKey = `${compType}|${aiCard.player}|${aiCard.year}|${aiCard.set}|${aiCard.variation}|${aiCard.cardNumber || ""}`.toLowerCase();
   const cached = readCompCache()[cacheKey];
   if (cached && Date.now() - cached.ts < 1000 * 60 * 60 * 6) return cached.data;
 
@@ -142,6 +189,7 @@ async function fetchEbayComps(aiCard) {
         set: aiCard.set,
         variation: aiCard.variation,
         cardNumber: aiCard.cardNumber,
+        compType,
       }),
     });
 
@@ -215,6 +263,7 @@ function renderResult({ aiCard, comps, verdict, askingPrice }) {
   upsideValue.textContent = `$${(comps.averageComp - askingPrice).toFixed(2)}`;
   psaUpsideValue.textContent = `$${Math.max(0, (aiCard.gradedUpside || comps.highestComp) - askingPrice).toFixed(2)}`;
   predictedPsaGrade.textContent = aiCard.predictedPsaGrade || "Unknown";
+  gemProbability.textContent = `${Number(aiCard.gemProbability || aiCard.psa10Probability || 0).toFixed(0)}%`;
   coinScore.textContent = String(Number(aiCard.coinScore || 50));
   psa9Value.textContent = `$${Number(aiCard.psa9Value || 0).toFixed(2)}`;
   psa10Value.textContent = `$${Number(aiCard.psa10Value || 0).toFixed(2)}`;
@@ -325,4 +374,18 @@ function computePayTargets(comps, aiCard) {
     strongBuyUnder: fair * 0.75,
     avoidAbove: fair * 1.15,
   };
+}
+
+function getCompType() {
+  const selected = document.querySelector('input[name="compType"]:checked');
+  return selected?.value || "raw";
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 }

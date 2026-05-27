@@ -15,11 +15,24 @@
 
     <main class="container">
       <section class="panel scan-panel">
+        <div class="mode-head">
+          <h2>Quick Scan</h2>
+          <p>1-tap default: front photo + asking price.</p>
+        </div>
+
+        <label class="field-label">Comp Type</label>
+        <div class="toggle-group" id="compTypeGroup">
+          <label><input type="radio" name="compType" value="raw" checked /> Raw</label>
+          <label><input type="radio" name="compType" value="psa" /> PSA</label>
+          <label><input type="radio" name="compType" value="bgs" /> BGS</label>
+          <label><input type="radio" name="compType" value="sgc" /> SGC</label>
+        </div>
+
         <label for="cardImage" class="upload-zone" id="uploadZone">
           <input id="cardImage" type="file" accept="image/*" hidden />
           <img id="previewImage" alt="Card preview" class="preview hidden" />
           <div id="uploadText">
-            <strong>Upload sports card</strong>
+            <strong>Upload front photo</strong>
             <span>Tap to select image</span>
           </div>
         </label>
@@ -27,7 +40,7 @@
         <label for="askingPrice" class="field-label">Asking Price ($)</label>
         <input id="askingPrice" type="number" min="0" step="0.01" placeholder="e.g. 85" />
 
-        <button id="scanBtn" class="scan-btn">Scan Card</button>
+        <button id="scanBtn" class="scan-btn">Quick Scan</button>
       </section>
 
       <section class="panel result-panel hidden" id="resultPanel">
@@ -48,8 +61,9 @@
             <p>Estimated Value <strong id="estimatedValue">$0</strong></p>
             <p>Asking Price <strong id="askingValue">$0</strong></p>
             <p>Potential Profit <strong id="upsideValue">$0</strong></p>
+            <p>Quick PSA Estimate <strong id="predictedPsaGrade">Unknown</strong></p>
+            <p>Gem Probability <strong id="gemProbability">--%</strong></p>
             <p>PSA Upside <strong id="psaUpsideValue">$0</strong></p>
-            <p>Predicted Grade <strong id="predictedPsaGrade">Unknown</strong></p>
             <p>Coin Score <strong id="coinScore">50</strong></p>
             <p>PSA 9 Value <strong id="psa9Value">$0</strong></p>
             <p>PSA 10 Value <strong id="psa10Value">$0</strong></p>
@@ -60,13 +74,32 @@
         </div>
 
         <p id="reasoning" class="reasoning">Scan a card to see the expert breakdown.</p>
-
         <p id="compSummary" class="comp-summary">Based on 0 recent comps</p>
         <p id="recentSales" class="recent-sales">Recent sold prices will appear here.</p>
         <p id="marketMeta" class="recent-sales">Confidence and trend details will appear here.</p>
         <p id="transparencyMeta" class="recent-sales">Data transparency details will appear here.</p>
         <p id="gradingRecommendation" class="recent-sales">Grading recommendation will appear here.</p>
         <p id="visualCondition" class="recent-sales">Visual condition details will appear here.</p>
+
+        <button id="openDeepBtn" class="scan-btn secondary-btn">Analyze For Grading</button>
+
+        <section id="deepPanel" class="deep-panel hidden">
+          <h3>Deep Grade Analysis</h3>
+          <p class="recent-sales">Upload HD photos for premium-level grading signals.</p>
+
+          <label for="frontHdImage" class="field-label">Front photo (HD)</label>
+          <input id="frontHdImage" type="file" accept="image/*" />
+
+          <label for="backHdImage" class="field-label">Back photo (HD)</label>
+          <input id="backHdImage" type="file" accept="image/*" />
+
+          <label for="angleImage" class="field-label">Angled light photo (optional)</label>
+          <input id="angleImage" type="file" accept="image/*" />
+
+          <button id="deepAnalyzeBtn" class="scan-btn">Run Deep Grade Analysis</button>
+          <p id="deepResult" class="recent-sales">No deep analysis run yet.</p>
+        </section>
+
         <div id="compListings" class="comp-listings"></div>
       </section>
 
@@ -80,20 +113,6 @@
         <p class="recent-sales">Market Movers: <strong id="marketMovers">No data yet</strong></p>
       </section>
     </main>
-    <footer class="app-header">
-      <p>
-        Card Sniper provides AI-assisted market estimates using recent public sales data. Values, grading projections, and buy recommendations are
-        estimates only and are for informational purposes only. No guarantee of resale value, grade outcome, or authenticity is provided. Users
-        assume all purchase, grading, and resale risk.
-      </p>
-      <details>
-        <summary>Terms of Service (Summary)</summary>
-        <p class="recent-sales">
-          By using Card Sniper, you agree results are estimates only, not professional appraisal/authentication, and not financial advice. Card
-          Sniper is not liable for losses, grading outcomes, purchase decisions, or resale outcomes.
-        </p>
-      </details>
-    </footer>
 
     <script>
       window.SUPABASE_PROJECT_URL = "https://yerwrbfqctpxfrycuhgv.supabase.co";
