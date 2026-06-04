@@ -9,6 +9,8 @@ type CompRequest = {
   set?: string;
   variation?: string;
   cardNumber?: string;
+  parallel?: string;
+  insertName?: string;
   isGraded?: boolean;
   gradingCompany?: string;
   grade?: string;
@@ -42,6 +44,9 @@ type EbayCompResponse = {
   gradedCount: number;
   rawCount: number;
   soldOnly: true;
+  premiumInsert: string;
+  valueRange: { low: number; high: number };
+  lowConfidenceRange: boolean;
 };
 
 const BLOCKED_KEYWORDS = ["pack", "packs", "lot", "lots", "reprint", "custom", "digital", "epack", "e-pack", "mystery pack", "fake"];
@@ -64,7 +69,19 @@ const GRADED_KEYWORDS = [
   "black label",
   "auto 10",
 ];
-const RAW_EXCLUDE_KEYWORDS = ["psa", "bgs", "sgc", "cgc", "gem", "mint 9", "mint 10", "auto 10", "pristine", "black label"];
+const RAW_EXCLUDE_KEYWORDS = ["psa", "bgs", "sgc", "cgc", "gem mint", "mint 9", "mint 10", "auto 10", "pristine", "black label"];
+const PREMIUM_INSERTS = [
+  "Downtown",
+  "Kaboom",
+  "Color Blast",
+  "Manga",
+  "Genesis",
+  "Gold Prizm",
+  "Silver Prizm",
+  "Zebra",
+  "Stained Glass",
+  "Blank Slate",
+];
 
 console.log("Using eBay PRODUCTION environment");
 
@@ -74,7 +91,8 @@ Deno.serve(async (req: Request) => {
 
   try {
     const body = (await req.json()) as CompRequest;
-    const normalized = buildNormalizedSearchTerms(body);
+    const premiumInsert = detectPremiumInsert(body);
+    const normalized = buildNormalizedSearchTerms(body, premiumInsert);
     const query = normalized.primary;
 
     if (!query) {
@@ -107,8 +125,8 @@ Deno.serve(async (req: Request) => {
       .filter((item: any) => !hasBlockedKeyword(item.title) && !hasSpamKeyword(item.title));
     console.log("Sold comps found:", soldListings.length);
 
-    const { filtered, rawCount, gradedRemoved } = filterByConditionAndGrade(soldListings, detectedGrading);
-    console.log("Raw comps kept:", rawCount);
+    const { filtered, rawCount: keptRawCount, gradedRemoved } = filterByConditionAndGrade(soldListings, detectedGrading, premiumInsert);
+    console.log("Raw comps kept:", keptRawCount);
     console.log("Graded comps removed:", gradedRemoved);
 
     const scoredListings = filtered
@@ -142,7 +160,7 @@ Deno.serve(async (req: Request) => {
       recentSales,
       listings: sortedListings.slice(0, 8),
       compCount: prices.length,
-      confidence: confidenceScore < 40 ? "low" : confidenceScore < 72 ? "medium" : "high",
+      confidence: prices.length < 3 ? "low" : confidenceScore < 40 ? "low" : confidenceScore < 72 ? "medium" : "high",
       confidenceScore,
       compQuality: prices.length < 3 ? "weak" : prices.length < 7 ? "fair" : "strong",
       trend: computeTrend(recentSales),
@@ -152,6 +170,9 @@ Deno.serve(async (req: Request) => {
       gradedCount,
       rawCount,
       soldOnly: true,
+      premiumInsert,
+      valueRange: buildValueRange(prices, medianComp, premiumInsert),
+      lowConfidenceRange: prices.length < 3,
     };
 
     return jsonResponse(response, 200);
@@ -163,6 +184,36 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ error: "Internal server error." }, 500);
   }
 });
+
+function detectPremiumInsert(body: CompRequest): string {
+  const source = [body.insertName, body.parallel, body.variation, body.set, body.cardNumber]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return PREMIUM_INSERTS.find((name) => source.includes(name.toLowerCase())) || "";
+}
+
+function hasCardNumber(lowerTitle: string, cardNumber: string): boolean {
+  const normalized = cardNumber.toLowerCase().replace(/^#/, "");
+  return new RegExp(`(^|[^a-z0-9])#?${escapeRegExp(normalized)}([^a-z0-9]|$)`, "i").test(lowerTitle);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function buildValueRange(prices: number[], medianComp: number, premiumInsert = ""): { low: number; high: number } {
+  if (prices.length) {
+    const low = Math.min(...prices);
+    const high = Math.max(...prices);
+    return prices.length < 3
+      ? { low: low * 0.9, high: Math.max(high * 1.1, low * 1.25) }
+      : { low, high };
+  }
+  if (!medianComp) return { low: 0, high: 0 };
+  return premiumInsert
+    ? { low: medianComp * 0.85, high: medianComp * 1.6 }
+    : { low: medianComp * 0.82, high: medianComp * 1.18 };
+}
 
 function getAppId(): string {
   const EBAY_APP_ID = Deno.env.get("App ID");
@@ -230,10 +281,12 @@ function compRelevanceScore(
 
   if (!grading.isGraded && (lowerTitle.includes("raw") || lowerTitle.includes("ungraded"))) score += 15;
   if (grading.isGraded && lowerTitle.includes("graded")) score += 15;
-  if (grading.cardNumber && lowerTitle.includes(`#${grading.cardNumber.toLowerCase()}`)) score += 20;
+  if (grading.cardNumber && hasCardNumber(lowerTitle, grading.cardNumber)) score += 28;
   if (grading.year && lowerTitle.includes(grading.year.toLowerCase())) score += 10;
   if (grading.player && lowerTitle.includes(grading.player.toLowerCase())) score += 15;
   if (grading.set && lowerTitle.includes(grading.set.toLowerCase())) score += 15;
+  if (normalized.premiumInsert && lowerTitle.includes(normalized.premiumInsert.toLowerCase())) score += 60;
+  if (normalized.parallel && lowerTitle.includes(normalized.parallel.toLowerCase())) score += 22;
   if (grading.isGraded && grading.company && lowerTitle.includes(grading.company.toLowerCase())) score += 20;
   if (grading.isGraded && grading.grade && lowerTitle.includes(grading.grade.toLowerCase())) score += 12;
   if (lowerTitle.includes(" rc ") || lowerTitle.includes(" rookie")) score += 5;
@@ -257,28 +310,32 @@ function excludeOutlierPrices(values: number[]): number[] {
   return filtered.length ? filtered : values;
 }
 
-function buildNormalizedSearchTerms(body: CompRequest) {
+function buildNormalizedSearchTerms(body: CompRequest, premiumInsert = "") {
   const player = String(body.player ?? "").trim();
   const year = String(body.year ?? "").trim();
   const set = String(body.set ?? "").trim();
   const variation = String(body.variation ?? "").trim();
   const cardNumber = String(body.cardNumber ?? "").trim() || extractCardNumber(variation);
+  const parallel = String(body.parallel ?? "").trim();
+  const insertName = String(body.insertName ?? premiumInsert).trim() || premiumInsert;
   const rookieHint = /\b(rookie|rc|draft pick)\b/i.test(`${set} ${variation}`) ? "rookie rc" : "";
 
-  const primary = [player, year, set, variation].filter(Boolean).join(" ");
+  const primary = [player, year, set, insertName || variation, parallel, cardNumber ? `#${cardNumber}` : ""].filter(Boolean).join(" ");
   const variationWithoutNoise = variation.replace(/draft pick/gi, "").trim();
-  const v1 = [player, set, rookieHint].filter(Boolean).join(" ");
-  const v2 = [year, set, player, cardNumber ? `#${cardNumber}` : ""].filter(Boolean).join(" ");
-  const v3 = [player, "RC", set].filter(Boolean).join(" ");
-  const queryVariants = [primary, v1, v2, v3, variationWithoutNoise].filter(Boolean);
+  const v1 = [player, year, insertName, cardNumber ? `#${cardNumber}` : ""].filter(Boolean).join(" ");
+  const v2 = [player, year, set, insertName, parallel].filter(Boolean).join(" ");
+  const v3 = [year, set, player, cardNumber ? `#${cardNumber}` : ""].filter(Boolean).join(" ");
+  const v4 = [player, set, rookieHint].filter(Boolean).join(" ");
+  const v5 = [player, "RC", set].filter(Boolean).join(" ");
+  const queryVariants = [primary, v1, v2, v3, v4, v5, variationWithoutNoise].filter(Boolean);
   const searchKeywords = queryVariants.join(" OR ");
-  const tokens = [player, year, set, variationWithoutNoise, cardNumber ? `#${cardNumber}` : ""]
+  const tokens = [player, year, set, insertName, parallel, variationWithoutNoise, cardNumber ? `#${cardNumber}` : ""]
     .join(" ")
     .toLowerCase()
     .split(/[^a-z0-9#]+/)
     .filter((token) => token.length > 1);
 
-  return { primary, searchKeywords, tokens, queryVariants };
+  return { primary, searchKeywords, tokens, queryVariants, premiumInsert, parallel, cardNumber };
 }
 
 function detectGradingProfile(body: CompRequest, query: string) {
@@ -296,12 +353,13 @@ function detectGradingProfile(body: CompRequest, query: string) {
   };
 }
 
-function filterByConditionAndGrade(listings: any[], grading: ReturnType<typeof detectGradingProfile>) {
+function filterByConditionAndGrade(listings: any[], grading: ReturnType<typeof detectGradingProfile>, premiumInsert = "") {
   let rawCount = 0;
   let gradedRemoved = 0;
   const filtered = listings.filter((item) => {
     const title = String(item.title ?? "");
     const lower = title.toLowerCase();
+    if (premiumInsert && !lower.includes(premiumInsert.toLowerCase())) return false;
     if (!grading.isGraded) {
       const blocked = RAW_EXCLUDE_KEYWORDS.some((keyword) => lower.includes(keyword));
       if (blocked || looksGraded(title)) {
@@ -336,7 +394,7 @@ function jsonResponse(data: unknown, status = 200) {
 
 async function fetchCompletedItems(appId: string, queries: string[]): Promise<any[]> {
   const unique = new Map<string, any>();
-  for (const query of queries.slice(0, 5)) {
+  for (const query of queries.slice(0, 7)) {
     const searchUrl = new URL("https://svcs.ebay.com/services/search/FindingService/v1");
     searchUrl.searchParams.set("OPERATION-NAME", "findCompletedItems");
     searchUrl.searchParams.set("SERVICE-VERSION", "1.13.0");
