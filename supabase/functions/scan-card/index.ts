@@ -23,12 +23,26 @@ type BaseAnalysis = {
   psa9Value: number;
   psa10Value: number;
   gradingRecommendation: string;
-  coinScore: number;
+  gemScore: number;
+  premiumInsert: string;
   centeringLeftRight: string;
   centeringTopBottom: string;
   cornerWear: string;
   surfaceScratches: string;
 };
+
+const PREMIUM_INSERTS = [
+  "Downtown",
+  "Kaboom",
+  "Color Blast",
+  "Manga",
+  "Genesis",
+  "Gold Prizm",
+  "Silver Prizm",
+  "Zebra",
+  "Stained Glass",
+  "Blank Slate",
+];
 
 type ScanResult = BaseAnalysis & {
   player: string;
@@ -92,15 +106,18 @@ Return ONLY this exact structure:
   "psa9Value": number,
   "psa10Value": number,
   "gradingRecommendation": "string",
-  "coinScore": number,
+  "gemScore": number,
   "centeringLeftRight": "string",
   "centeringTopBottom": "string",
   "cornerWear": "string",
-  "surfaceScratches": "string"
+  "surfaceScratches": "string",
+  "premiumInsert": "string"
 }
 
 Context: the user paid ${askingPrice} USD for this card. Use that as a pricing reference while estimating value and upside.
-Card number and parallel are critical for comp matching. If unclear, return empty string for cardNumber/parallel.
+Card number, premium insert name, and parallel are critical for comp matching. If unclear, return empty string for cardNumber/parallel/premiumInsert.
+Detect premium inserts when visible: Downtown, Kaboom, Color Blast, Manga, Genesis, Gold Prizm, Silver Prizm, Zebra, Stained Glass, Blank Slate.
+gemScore is a 1-100 visual grading confidence score, not an investment score.
 predictedPsaGrade should be like "PSA 8", "PSA 9", "PSA 10", or "Unknown".`;
 
     const imageUrl = image.startsWith("data:image") ? image : `data:image/jpeg;base64,${image}`;
@@ -251,7 +268,8 @@ function normalizeScanResult(value: any, askingPrice: number): ScanResult | null
     psa9Value: toNumber(value.psa9Value, 0),
     psa10Value: toNumber(value.psa10Value, 0),
     gradingRecommendation: String(value.gradingRecommendation ?? "").trim() || "Not enough surface detail to confidently recommend grading.",
-    coinScore: clampScore(toNumber(value.coinScore, 50)),
+    gemScore: clampScore(toNumber(value.gemScore ?? value.coinScore, 50)),
+    premiumInsert: String(value.premiumInsert ?? detectPremiumInsert(value)).trim(),
     centeringLeftRight: String(value.centeringLeftRight ?? "Unknown").trim() || "Unknown",
     centeringTopBottom: String(value.centeringTopBottom ?? "Unknown").trim() || "Unknown",
     cornerWear: String(value.cornerWear ?? "Unknown").trim() || "Unknown",
@@ -270,6 +288,14 @@ function normalizeScanResult(value: any, askingPrice: number): ScanResult | null
     snipeScore,
     verdict,
   };
+}
+
+function detectPremiumInsert(value: any): string {
+  const source = [value?.premiumInsert, value?.parallel, value?.variation, value?.set, value?.cardNumber]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return PREMIUM_INSERTS.find((name) => source.includes(name.toLowerCase())) || "";
 }
 
 function toNumber(value: unknown, fallback: number): number {
@@ -318,7 +344,8 @@ function buildFallbackResult(askingPrice: number): ScanResult {
     psa9Value: 0,
     psa10Value: 0,
     gradingRecommendation: "Not enough detail to recommend grading.",
-    coinScore: 50,
+    gemScore: 50,
+    premiumInsert: "",
     centeringLeftRight: "Unknown",
     centeringTopBottom: "Unknown",
     cornerWear: "Unknown",

@@ -153,3 +153,44 @@ input {
 .secondary-btn { margin-top: 1rem; background: linear-gradient(90deg,#334155,#1f2937); }
 .deep-panel { margin-top: .9rem; border-top: 1px solid #28304f; padding-top: .85rem; }
 .deep-panel h3 { margin:0 0 .25rem; }
+
+
+.market-warning {
+  margin: 0 0 .85rem;
+  padding: .8rem;
+  border: 1px solid rgba(239, 68, 68, .75);
+  border-radius: 12px;
+  background: rgba(239, 68, 68, .14);
+  color: #fecaca;
+  font-weight: 800;
+  line-height: 1.35;
+}
+.market-warning span {
+  font-size: .9rem;
+  font-weight: 600;
+  color: #fee2e2;
+}
+.grading-summary {
+  margin: .65rem 0;
+  padding: .65rem;
+  border: 1px solid #34406a;
+  border-radius: 12px;
+  background: rgba(79, 70, 229, .09);
+}
+.secondary-details {
+  margin-top: .55rem;
+  color: var(--muted);
+}
+.secondary-details summary {
+  cursor: pointer;
+  color: #c8d1f6;
+  font-weight: 700;
+}
+
+.share-btn {
+  background: linear-gradient(90deg, #f97316, #ec4899);
+}
+.share-status {
+  text-align: center;
+  margin-top: .45rem;
+}
