@@ -34,7 +34,7 @@ type EbayCompResponse = {
   recentSales: number[];
   listings: EbayListing[];
   compCount: number;
-  confidence: "low" | "medium" | "high";
+  confidence: "very_low" | "low" | "medium" | "high";
   confidenceScore: number;
   compQuality: "weak" | "fair" | "strong";
   trend: "up" | "down" | "stable" | "unknown";
@@ -70,6 +70,7 @@ const GRADED_KEYWORDS = [
   "auto 10",
 ];
 const RAW_EXCLUDE_KEYWORDS = ["psa", "bgs", "sgc", "cgc", "gem mint", "mint 9", "mint 10", "auto 10", "pristine", "black label"];
+const RARE_CARD_KEYWORDS = ["gold", "geometric", "numbered", "parallel", "refractor", "short print", "ssp", "case hit", "rookie", "auto", "autograph"];
 const PREMIUM_INSERTS = [
   "Downtown",
   "Kaboom",
@@ -78,6 +79,8 @@ const PREMIUM_INSERTS = [
   "Genesis",
   "Gold Prizm",
   "Silver Prizm",
+  "Gold Geometric",
+  "Geometric",
   "Zebra",
   "Stained Glass",
   "Blank Slate",
@@ -160,7 +163,7 @@ Deno.serve(async (req: Request) => {
       recentSales,
       listings: sortedListings.slice(0, 8),
       compCount: prices.length,
-      confidence: prices.length < 3 ? "low" : confidenceScore < 40 ? "low" : confidenceScore < 72 ? "medium" : "high",
+      confidence: deriveCompConfidence(prices.length),
       confidenceScore,
       compQuality: prices.length < 3 ? "weak" : prices.length < 7 ? "fair" : "strong",
       trend: computeTrend(recentSales),
@@ -190,7 +193,25 @@ function detectPremiumInsert(body: CompRequest): string {
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
-  return PREMIUM_INSERTS.find((name) => source.includes(name.toLowerCase())) || "";
+  const premiumInsert = PREMIUM_INSERTS.find((name) => source.includes(name.toLowerCase()));
+  if (premiumInsert) return premiumInsert;
+  if (isRareOrNumberedCard(body)) return "Rare / Numbered";
+  return "";
+}
+
+function isRareOrNumberedCard(body: CompRequest): boolean {
+  const source = [body.insertName, body.parallel, body.variation, body.set, body.cardNumber]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return /(?:^|\D)\d+\s*\/\s*\d+(?:\D|$)/.test(source) || RARE_CARD_KEYWORDS.some((keyword) => source.includes(keyword));
+}
+
+function deriveCompConfidence(compCount: number): EbayCompResponse["confidence"] {
+  if (compCount === 0) return "very_low";
+  if (compCount <= 2) return "low";
+  if (compCount <= 5) return "medium";
+  return "high";
 }
 
 function hasCardNumber(lowerTitle: string, cardNumber: string): boolean {

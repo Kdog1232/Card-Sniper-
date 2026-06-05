@@ -90,7 +90,9 @@ input {
 
 .result-panel { transition: all .3s ease; }
 .result-head { display:flex; justify-content:space-between; align-items:center; gap:1rem; }
+.verdict-wrap { display: grid; gap: .35rem; align-items: start; }
 .badge { margin:0; padding:.35rem .7rem; border-radius:999px; font-size:.95rem; font-weight: 800; letter-spacing:.4px; }
+.verdict-reason { margin: 0; color: var(--muted); font-size: .86rem; font-weight: 700; }
 .score-wrap p { margin:0; color:var(--muted); font-size:.85rem; text-align:right; }
 .score { font-size:2.4rem; font-weight:900; text-align:right; }
 .score.pop { animation: popScore .5s ease; }
