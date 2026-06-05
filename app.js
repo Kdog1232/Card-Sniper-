@@ -20,6 +20,7 @@ const cardTitle = document.getElementById("cardTitle");
 const cardMeta = document.getElementById("cardMeta");
 const estimatedValue = document.getElementById("estimatedValue");
 const estimatedValueLabel = document.getElementById("estimatedValueLabel");
+const verdictReason = document.getElementById("verdictReason");
 const marketWarning = document.getElementById("marketWarning");
 const askingValue = document.getElementById("askingValue");
 const upsideValue = document.getElementById("upsideValue");
@@ -51,7 +52,7 @@ const marketMovers = document.getElementById("marketMovers");
 let imageDataUrl = "";
 let currentShareScan = null;
 const HISTORY_KEY = "card_sniper_scan_history_v1";
-const COMP_CACHE_KEY = "card_sniper_comp_cache_v2";
+const COMP_CACHE_KEY = "card_sniper_comp_cache_v3";
 const SHARE_BRAND_URL = "cardsniper.app";
 const PREMIUM_INSERTS = [
   "Downtown",
@@ -61,10 +62,13 @@ const PREMIUM_INSERTS = [
   "Genesis",
   "Gold Prizm",
   "Silver Prizm",
+  "Gold Geometric",
+  "Geometric",
   "Zebra",
   "Stained Glass",
   "Blank Slate",
 ];
+const RARE_CARD_KEYWORDS = ["gold", "geometric", "numbered", "parallel", "refractor", "short print", "ssp", "case hit", "rookie", "auto", "autograph"];
 
 renderDashboard();
 
@@ -100,7 +104,7 @@ shareResultBtn?.addEventListener("click", async () => {
     if (navigator.canShare?.({ files: [file] })) {
       await navigator.share({
         title: "Card Sniper Result",
-        text: `${currentShareScan.verdict} ${currentShareScan.cardTitle} • ${currentShareScan.estimatedLabel} ${currentShareScan.estimatedText} • ${SHARE_BRAND_URL}`,
+        text: `${currentShareScan.verdict} ${currentShareScan.cardTitle} • ${formatShareSummaryText(currentShareScan)} • ${SHARE_BRAND_URL}`,
         files: [file],
       });
       shareStatus.textContent = "Share image ready.";
@@ -168,7 +172,7 @@ scanBtn.addEventListener("click", async () => {
   try {
     const aiCard = await analyzeCardWithOpenAI(imageDataUrl, askingPrice, { mode: "quick_scan", compType: getCompType() });
     const comps = await fetchEbayComps(aiCard, getCompType());
-    const verdict = scoreDeal(askingPrice, comps.averageComp);
+    const verdict = scoreDeal(askingPrice, comps.averageComp, comps);
     renderResult({ aiCard, comps, verdict, askingPrice });
   } catch (err) {
     console.error(err);
@@ -218,7 +222,7 @@ async function fetchEbayComps(aiCard, compType = "raw") {
 
   const premiumInsert = detectPremiumInsert(aiCard);
   const fallbackBase = Number(aiCard.estimatedMarketValue || 0);
-  const fallbackRange = buildLowConfidenceRange(fallbackBase, [], premiumInsert, Number(askingInput.value || 0));
+  const fallbackRange = buildAiEstimateRange(fallbackBase);
   const fallback = {
     averageComp: fallbackBase,
     medianComp: fallbackBase,
@@ -228,11 +232,13 @@ async function fetchEbayComps(aiCard, compType = "raw") {
     recentSales: [],
     listings: [],
     compCount: 0,
-    confidence: "low",
+    confidence: deriveCompConfidence(0),
     confidenceScore: 0,
     displayConfidenceScore: 0,
     compQuality: "weak",
     premiumInsert,
+    noVerifiedComps: true,
+    aiEstimateFallback: true,
     lowConfidenceRange: true,
     usedFallback: true,
   };
@@ -262,16 +268,25 @@ async function fetchEbayComps(aiCard, compType = "raw") {
     if (!response.ok) throw new Error(`ebay-comps failed: ${response.status}`);
 
     const data = await response.json();
+    const compCount = Number(data.compCount || 0);
+    const recentSales = Array.isArray(data.recentSales) ? data.recentSales.map(Number).filter(Number.isFinite) : [];
+    const noVerifiedComps = compCount === 0;
+    const aiRange = buildAiEstimateRange(fallbackBase);
+    const apiRange = data.valueRange || buildLowConfidenceRange(Number(data.medianComp || data.averageComp || 0), recentSales, data.premiumInsert || premiumInsert, Number(askingInput.value || 0));
+    const safeRange = noVerifiedComps ? aiRange : apiRange;
+    const safeBase = noVerifiedComps ? fallbackBase : Number(data.averageComp || 0);
+    const safeMedian = noVerifiedComps ? fallbackBase : Number(data.medianComp || data.averageComp || 0);
     const payload = {
-      averageComp: Number(data.averageComp || 0),
-      medianComp: Number(data.medianComp || data.averageComp || 0),
-      lowestComp: Number(data.lowestComp || 0),
-      highestComp: Number(data.highestComp || 0),
-      recentSales: Array.isArray(data.recentSales) ? data.recentSales.map(Number).filter(Number.isFinite) : [],
+      averageComp: safeBase,
+      medianComp: safeMedian,
+      lowestComp: noVerifiedComps ? safeRange.low : Number(data.lowestComp || 0),
+      highestComp: noVerifiedComps ? safeRange.high : Number(data.highestComp || 0),
+      recentSales,
       listings: Array.isArray(data.listings) ? data.listings : [],
-      compCount: Number(data.compCount || 0),
-      confidence: Number(data.compCount || 0) < 3 ? "low" : String(data.confidence || "medium"),
+      compCount,
+      confidence: deriveCompConfidence(compCount),
       confidenceScore: Number(data.confidenceScore || 0),
+      displayConfidenceScore: noVerifiedComps ? 0 : undefined,
       compQuality: String(data.compQuality || "weak"),
       trend: String(data.trend || "unknown"),
       liquidity: String(data.liquidity || "weak"),
@@ -280,9 +295,11 @@ async function fetchEbayComps(aiCard, compType = "raw") {
       gradedCount: Number(data.gradedCount || 0),
       rawCount: Number(data.rawCount || 0),
       premiumInsert: data.premiumInsert || premiumInsert,
-      valueRange: data.valueRange || buildLowConfidenceRange(Number(data.medianComp || data.averageComp || 0), Array.isArray(data.recentSales) ? data.recentSales.map(Number).filter(Number.isFinite) : [], data.premiumInsert || premiumInsert, Number(askingInput.value || 0)),
-      lowConfidenceRange: Boolean(data.lowConfidenceRange || Number(data.compCount || 0) < 3),
-      usedFallback: false,
+      noVerifiedComps,
+      aiEstimateFallback: noVerifiedComps,
+      valueRange: safeRange,
+      lowConfidenceRange: Boolean(data.lowConfidenceRange || compCount < 3 || noVerifiedComps),
+      usedFallback: noVerifiedComps,
     };
     const cache = readCompCache();
     cache[cacheKey] = { ts: Date.now(), data: payload };
@@ -294,30 +311,42 @@ async function fetchEbayComps(aiCard, compType = "raw") {
   }
 }
 
-function scoreDeal(asking, marketValue) {
-  const ratio = asking / marketValue;
+function scoreDeal(asking, marketValue, comps = {}) {
+  const value = Number(marketValue || 0);
+  const ratio = value > 0 ? asking / value : Infinity;
   let label = "FAIR";
-  let score = 62;
+  let score = value > 0 ? 62 : 35;
 
   if (ratio <= 0.75) {
     label = "BUY";
     score = Math.min(100, Math.round((1 - ratio) * 140 + 70));
   } else if (ratio > 1.05) {
     label = "PASS";
-    score = Math.max(1, Math.round(60 - (ratio - 1) * 110));
+    score = value > 0 ? Math.max(1, Math.round(60 - (ratio - 1) * 110)) : 25;
   } else {
     score = Math.max(40, Math.round(80 - Math.abs(1 - ratio) * 120));
   }
 
-  return { label, score };
+  return { label, score, reason: deriveVerdictReason(label, asking, value, comps) };
+}
+
+function deriveVerdictReason(label, asking, marketValue, comps = {}) {
+  const compCount = Number(comps.compCount || 0);
+  const weakMarketData = compCount === 0 || String(comps.confidence || "").toLowerCase() === "very_low";
+  if (weakMarketData) return "Weak Market Data";
+  if (label === "PASS" && marketValue > 0 && asking > marketValue * 1.05) return "Over Market Value";
+  if (label === "BUY" && compCount > 0) return "Below Recent Sales";
+  if (label === "BUY") return "Strong Value";
+  return "Near Market Value";
 }
 
 function renderResult({ aiCard, comps, verdict, askingPrice }) {
   resultPanel.classList.remove("hidden");
   if (shareStatus) shareStatus.textContent = "Creates a shareable image for social posts.";
 
-  cardTitle.textContent = `${aiCard.player} ${aiCard.year} ${aiCard.set}`;
-  cardMeta.textContent = `${aiCard.player} • ${aiCard.year} • ${aiCard.set} • ${aiCard.variation} • Condition ${aiCard.condition}/10`;
+  const displayCardName = buildCardDisplayName(aiCard, comps);
+  cardTitle.textContent = displayCardName || `${aiCard.player} ${aiCard.year} ${aiCard.set}`;
+  cardMeta.textContent = `${displayCardName || aiCard.player} • ${aiCard.year} • ${aiCard.set} • ${aiCard.variation} • Condition ${aiCard.condition}/10`;
 
   snipeScore.classList.remove("pop");
   void snipeScore.offsetWidth;
@@ -327,13 +356,14 @@ function renderResult({ aiCard, comps, verdict, askingPrice }) {
   verdictBadge.textContent = verdict.label;
   verdictBadge.className = "badge";
   verdictBadge.classList.add(verdict.label.toLowerCase());
+  if (verdictReason) verdictReason.textContent = `Reason: ${verdict.reason || deriveVerdictReason(verdict.label, askingPrice, comps.averageComp, comps)}`;
 
   const displayedConfidenceScore = getDisplayedConfidenceScore(comps);
   const showRange = shouldShowRange(comps);
   const range = normalizeRange(comps);
   if (showRange) {
-    estimatedValueLabel.textContent = "Estimated Range:";
-    estimatedValue.textContent = `$${range.low.toFixed(2)} - $${range.high.toFixed(2)}`;
+    estimatedValueLabel.textContent = comps.noVerifiedComps || comps.aiEstimateFallback ? "AI Estimated Range:" : "Estimated Range:";
+    estimatedValue.textContent = formatDisplayRange(range);
   } else {
     estimatedValueLabel.textContent = "Estimated Value";
     estimatedValue.textContent = `$${(comps.medianComp || comps.averageComp).toFixed(2)}`;
@@ -355,7 +385,10 @@ function renderResult({ aiCard, comps, verdict, askingPrice }) {
   strongBuyUnder.textContent = `$${payTargets.strongBuyUnder.toFixed(2)}`;
   avoidAbove.textContent = `$${payTargets.avoidAbove.toFixed(2)}`;
 
-  reasoning.textContent = aiCard.reasoning || "Comp spread and card attributes suggest a neutral buy zone.";
+  const highGemPassNote = Number(aiCard.gemScore || aiCard.coinScore || 0) > 90 && String(verdict.label || "") === "PASS"
+    ? " High grading potential, but pricing/data risk remains."
+    : "";
+  reasoning.textContent = `${aiCard.reasoning || "Comp spread and card attributes suggest a neutral buy zone."}${highGemPassNote}`;
 
   const salesText = comps.recentSales.length
     ? comps.recentSales.map((sale) => `$${sale.toFixed(2)}`).join(" • ")
@@ -364,19 +397,17 @@ function renderResult({ aiCard, comps, verdict, askingPrice }) {
 
   compSummary.textContent = comps.compCount
     ? `${showRange ? "Estimated Range" : "Estimated Median Sold"}: ${showRange ? `$${range.low.toFixed(2)} - $${range.high.toFixed(2)}` : `$${(comps.medianComp || comps.averageComp).toFixed(2)}`} • ${comps.compCount} sold comps${comps.premiumInsert ? ` • Premium Insert: ${comps.premiumInsert}` : ""}`
-    : comps.premiumInsert
-      ? `No reliable exact ${comps.premiumInsert} sold comps returned. Generic low fallback suppressed.`
-      : "No reliable comps returned. Showing low-confidence AI estimate range.";
+    : `No verified sold comps found. Showing AI estimate${comps.premiumInsert ? ` for ${comps.premiumInsert}` : ""}.`;
   marketMeta.textContent = comps.compCount
-    ? `Confidence: ${String(comps.confidence || "low").toUpperCase()} (${displayedConfidenceScore}/100) • Trend: ${String(comps.trend || "unknown").toUpperCase()} • Liquidity: ${String(comps.liquidity || "weak").toUpperCase()} • Raw/Graded: ${Number(comps.rawCount || 0)}/${Number(comps.gradedCount || 0)} • Auction/BIN: ${Number(comps.auctionCount || 0)}/${Number(comps.buyItNowCount || 0)}`
-    : "Confidence: LOW • Trend: UNKNOWN • Liquidity: WEAK";
+    ? `Confidence: ${formatConfidence(comps.confidence)} (${displayedConfidenceScore}/100) • Trend: ${String(comps.trend || "unknown").toUpperCase()} • Liquidity: ${String(comps.liquidity || "weak").toUpperCase()} • Raw/Graded: ${Number(comps.rawCount || 0)}/${Number(comps.gradedCount || 0)} • Auction/BIN: ${Number(comps.auctionCount || 0)}/${Number(comps.buyItNowCount || 0)}`
+    : "Confidence: VERY LOW • Trend: UNKNOWN • Liquidity: WEAK";
   const gradeText = aiCard.gradingRecommendation || "Not enough detail to recommend grading.";
   gradingRecommendationValue.textContent = gradeText;
   gradingRecommendation.textContent = `Grading Details: ${gradeText}`;
   visualCondition.textContent = `Visual: L/R ${aiCard.centeringLeftRight || "Unknown"} • T/B ${aiCard.centeringTopBottom || "Unknown"} • Corners: ${aiCard.cornerWear || "Unknown"} • Surface: ${aiCard.surfaceScratches || "Unknown"}`;
   transparencyMeta.textContent = comps.compCount
-    ? `Data Transparency: Confidence ${String(comps.confidence || "low").toUpperCase()} based on ${Number(comps.compCount || 0)} sold comps.`
-    : "Data Transparency: LOW confidence due to limited sold comp data.";
+    ? `Data Transparency: Confidence ${formatConfidence(comps.confidence)} based on ${Number(comps.compCount || 0)} sold comps.`
+    : "Data Transparency: VERY LOW confidence because no verified sold comps were found; AI estimate fallback is based on card attributes.";
   saveScanHistory({ aiCard, comps, verdict, askingPrice });
   renderDashboard();
 
@@ -400,20 +431,32 @@ function renderResult({ aiCard, comps, verdict, askingPrice }) {
 
 }
 
+function formatShareSummaryText(scan) {
+  return scan.noVerifiedComps
+    ? `NO VERIFIED SOLD COMPS • AI Estimate: ${scan.aiEstimateText}`
+    : `${scan.estimatedLabel} ${scan.estimatedText}`;
+}
+
 function buildShareScan({ aiCard, comps, verdict, askingPrice, showRange, range, payTargets }) {
-  const estimatedLabel = showRange ? "Estimated Range:" : "Estimated Value:";
-  const estimatedText = showRange
-    ? `$${range.low.toFixed(0)}-$${range.high.toFixed(0)}`
+  const noVerifiedComps = Number(comps.compCount || 0) === 0;
+  const estimateText = showRange
+    ? formatShareRange(range)
     : `$${Number(comps.medianComp || comps.averageComp || 0).toFixed(0)}`;
+  const gemScoreValue = Number(aiCard.gemScore || aiCard.coinScore || 50);
 
   return {
     score: Number(verdict.score || 0),
     verdict: String(verdict.label || "FAIR"),
-    cardTitle: [aiCard.player, aiCard.premiumInsert || comps.premiumInsert || aiCard.variation].filter(Boolean).join(" "),
-    estimatedLabel,
-    estimatedText,
-    gemScore: Number(aiCard.gemScore || aiCard.coinScore || 50),
-    confidence: String(comps.confidence || "low").toUpperCase(),
+    verdictReason: verdict.reason || deriveVerdictReason(verdict.label, askingPrice, comps.averageComp, comps),
+    cardTitle: buildCardDisplayName(aiCard, comps),
+    estimatedLabel: noVerifiedComps ? "NO VERIFIED SOLD COMPS" : showRange ? "Estimated Range:" : "Estimated Value:",
+    estimatedText: noVerifiedComps ? "NO VERIFIED SOLD COMPS" : estimateText,
+    aiEstimateLabel: noVerifiedComps ? "AI Estimate:" : "",
+    aiEstimateText: noVerifiedComps ? estimateText : "",
+    gemScore: gemScoreValue,
+    gemRiskNote: gemScoreValue > 90 && String(verdict.label || "") === "PASS" ? "High grading potential, but pricing/data risk remains." : "",
+    confidence: formatConfidence(comps.confidence),
+    noVerifiedComps,
     compCount: Number(comps.compCount || 0),
     goodBuyUnder: payTargets ? `$${payTargets.goodBuyUnder.toFixed(0)}` : "$0",
     askingPrice: `$${Number(askingPrice || 0).toFixed(0)}`,
@@ -458,30 +501,46 @@ async function createShareImage(scan) {
   drawCanvasText(ctx, SHARE_BRAND_URL, 970, 140, 30, 360, 1, 800);
   ctx.textAlign = "left";
 
-  drawConfidenceBadge(ctx, scan.confidence, scan.compCount, 760, 185, 210, 92);
+  drawConfidenceBadge(ctx, scan.confidence, scan.compCount, 710, 178, 270, 118);
 
   ctx.fillStyle = "#f0f3ff";
   drawCanvasText(ctx, `🔥 Snipe Score ${scan.score}`, 110, 240, 76, 860, 1.05, 900);
 
   const verdictColor = scan.verdict === "BUY" ? "#22c55e" : scan.verdict === "PASS" ? "#ef4444" : "#eab308";
   ctx.fillStyle = verdictColor;
-  drawCanvasText(ctx, scan.verdict, 110, 345, 72, 860, 1, 900);
+  drawCanvasText(ctx, scan.verdict, 110, 320, 70, 860, 1, 900);
 
   ctx.fillStyle = "#f0f3ff";
-  drawCanvasText(ctx, scan.cardTitle || "Card Scan Result", 110, 455, 52, 860, 1.12, 850);
-
-  ctx.fillStyle = "#9ea7c6";
-  drawCanvasText(ctx, scan.estimatedLabel, 110, 600, 40, 860, 1.1, 800);
-  ctx.fillStyle = "#97f5bb";
-  drawCanvasText(ctx, scan.estimatedText, 110, 670, 64, 860, 1.05, 900);
+  drawCanvasText(ctx, `Reason: ${scan.verdictReason}`, 110, 385, 32, 800, 1.05, 800);
 
   ctx.fillStyle = "#f0f3ff";
-  drawCanvasText(ctx, `Gem Score ${scan.gemScore}`, 110, 770, 44, 600, 1.1, 850);
+  drawCanvasText(ctx, scan.cardTitle || "Card Scan Result", 110, 480, 48, 860, 1.12, 850);
+
+  if (scan.noVerifiedComps) {
+    ctx.fillStyle = "#fecaca";
+    drawCanvasText(ctx, "NO VERIFIED SOLD COMPS", 110, 590, 38, 860, 1.05, 900);
+    ctx.fillStyle = "#9ea7c6";
+    drawCanvasText(ctx, scan.aiEstimateLabel, 110, 650, 34, 860, 1.05, 800);
+    ctx.fillStyle = "#97f5bb";
+    drawCanvasText(ctx, scan.aiEstimateText, 110, 705, 58, 860, 1.05, 900);
+  } else {
+    ctx.fillStyle = "#9ea7c6";
+    drawCanvasText(ctx, scan.estimatedLabel, 110, 625, 38, 860, 1.1, 800);
+    ctx.fillStyle = "#97f5bb";
+    drawCanvasText(ctx, scan.estimatedText, 110, 690, 58, 860, 1.05, 900);
+  }
+
+  ctx.fillStyle = "#f0f3ff";
+  drawCanvasText(ctx, `Gem Score ${scan.gemScore}`, 110, 790, 42, 600, 1.1, 850);
+  if (scan.gemRiskNote) {
+    ctx.fillStyle = "#fde68a";
+    drawCanvasText(ctx, scan.gemRiskNote, 110, 828, 22, 620, 1.08, 700);
+  }
 
   ctx.fillStyle = "#9ea7c6";
-  drawCanvasText(ctx, "Good Buy Under:", 110, 845, 34, 560, 1.05, 800);
+  drawCanvasText(ctx, "Good Buy Under:", 110, 875, 32, 560, 1.05, 800);
   ctx.fillStyle = "#97f5bb";
-  drawCanvasText(ctx, scan.goodBuyUnder, 110, 900, 52, 560, 1, 900);
+  drawCanvasText(ctx, scan.goodBuyUnder, 110, 930, 48, 560, 1, 900);
 
   drawQrCode(ctx, SHARE_BRAND_URL, 820, 790, 150);
   ctx.textAlign = "center";
@@ -502,12 +561,13 @@ async function createShareImage(scan) {
 }
 
 function drawConfidenceBadge(ctx, confidence, compCount, x, y, width, height) {
+  const count = Number(compCount || 0);
   const confidenceLabel = `${confidence || "LOW"} CONFIDENCE`;
-  const compLabel = `${compCount} sold ${compCount === 1 ? "comp" : "comps"}`;
+  const compLabel = `${count} SOLD ${count === 1 ? "COMP" : "COMPS"}`;
   const badgeColor = confidence === "HIGH" ? "rgba(34, 197, 94, 0.18)" : confidence === "MEDIUM" ? "rgba(234, 179, 8, 0.18)" : "rgba(239, 68, 68, 0.18)";
   const textColor = confidence === "HIGH" ? "#97f5bb" : confidence === "MEDIUM" ? "#fde68a" : "#fecaca";
 
-  roundRect(ctx, x, y, width, height, 18);
+  roundRect(ctx, x, y, width, height, 20);
   ctx.fillStyle = badgeColor;
   ctx.fill();
   ctx.strokeStyle = textColor;
@@ -516,9 +576,9 @@ function drawConfidenceBadge(ctx, confidence, compCount, x, y, width, height) {
 
   ctx.textAlign = "center";
   ctx.fillStyle = textColor;
-  drawCanvasText(ctx, confidenceLabel, x + width / 2, y + 34, 22, width - 24, 1, 900);
+  drawCanvasText(ctx, confidenceLabel, x + width / 2, y + 42, 18, width - 30, 1, 900);
   ctx.fillStyle = "#f0f3ff";
-  drawCanvasText(ctx, compLabel, x + width / 2, y + 66, 24, width - 24, 1, 800);
+  drawCanvasText(ctx, compLabel, x + width / 2, y + 82, 25, width - 30, 1, 800);
   ctx.textAlign = "left";
 }
 
@@ -745,12 +805,57 @@ function slugify(value) {
     .slice(0, 60) || "card-sniper-result";
 }
 
+
+function buildCardDisplayName(aiCard, comps = {}) {
+  const player = String(aiCard?.player || "").trim();
+  const premiumName = String(aiCard?.premiumInsert || comps?.premiumInsert || "").trim();
+  const variationName = stripSerialNumber(String(aiCard?.insertName || aiCard?.parallel || aiCard?.variation || "").trim());
+  const descriptor = premiumName && premiumName !== "Rare / Numbered" ? premiumName : variationName;
+  const cardNumber = formatCardNumberLabel(aiCard?.cardNumber);
+  const serialNumber = formatSerialNumberLabel(aiCard?.serialNumber || extractSerialNumber(aiCard));
+  return [player, descriptor, cardNumber, serialNumber].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+}
+
+function stripSerialNumber(value) {
+  return String(value || "").replace(/(?:^|\s)\/?\d+\s*\/\s*\d+\b/g, "").replace(/\s+/g, " ").trim();
+}
+
+function formatCardNumberLabel(cardNumber) {
+  const clean = stripSerialNumber(String(cardNumber || "").trim());
+  if (!clean || clean.startsWith("/")) return "";
+  return clean.startsWith("#") ? clean : `#${clean}`;
+}
+
+function extractSerialNumber(card) {
+  const source = [card?.serialNumber, card?.cardNumber, card?.parallel, card?.variation, card?.insertName]
+    .filter(Boolean)
+    .join(" ");
+  return source.match(/(?:^|\s)(\/?\d+\s*\/\s*\d+)\b/)?.[1] || "";
+}
+
+function formatSerialNumberLabel(serialNumber) {
+  const clean = String(serialNumber || "").trim().replace(/\s+/g, "");
+  if (!clean) return "";
+  return clean.startsWith("/") ? clean : `/${clean.split("/").pop()}`;
+}
+
 function detectPremiumInsert(card) {
   const haystack = [card?.insertName, card?.parallel, card?.variation, card?.set, card?.cardNumber]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
-  return PREMIUM_INSERTS.find((name) => haystack.includes(name.toLowerCase())) || "";
+  const premiumInsert = PREMIUM_INSERTS.find((name) => haystack.includes(name.toLowerCase()));
+  if (premiumInsert) return premiumInsert;
+  if (isRareOrNumberedCard(card)) return "Rare / Numbered";
+  return "";
+}
+
+function isRareOrNumberedCard(card) {
+  const haystack = [card?.insertName, card?.parallel, card?.variation, card?.set, card?.cardNumber]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return /(?:^|\D)\d+\s*\/\s*\d+(?:\D|$)/.test(haystack) || RARE_CARD_KEYWORDS.some((keyword) => haystack.includes(keyword));
 }
 
 function shouldShowRange(comps) {
@@ -761,6 +866,34 @@ function normalizeRange(comps) {
   const low = Number(comps.valueRange?.low || comps.lowestComp || comps.medianComp || comps.averageComp || 0);
   const high = Number(comps.valueRange?.high || comps.highestComp || comps.medianComp || comps.averageComp || 0);
   return { low: Math.max(0, Math.min(low, high)), high: Math.max(low, high) };
+}
+
+function buildAiEstimateRange(baseValue) {
+  const base = Number(baseValue || 0);
+  if (!Number.isFinite(base) || base <= 0) return { low: 0, high: 0 };
+  return { low: base * 0.8, high: base * 1.2 };
+}
+
+function formatDisplayRange(range) {
+  if (!Number(range?.low || 0) && !Number(range?.high || 0)) return "No verified sold comps found.";
+  return `$${Number(range.low || 0).toFixed(2)} - $${Number(range.high || 0).toFixed(2)}`;
+}
+
+function formatShareRange(range) {
+  if (!Number(range?.low || 0) && !Number(range?.high || 0)) return "No verified sold comps";
+  return `$${Number(range.low || 0).toFixed(0)}-$${Number(range.high || 0).toFixed(0)}`;
+}
+
+function deriveCompConfidence(compCount) {
+  const count = Number(compCount || 0);
+  if (count === 0) return "very_low";
+  if (count <= 2) return "low";
+  if (count <= 5) return "medium";
+  return "high";
+}
+
+function formatConfidence(confidence) {
+  return String(confidence || "low").replace(/_/g, " ").toUpperCase();
 }
 
 function buildLowConfidenceRange(baseValue, sales = [], premiumInsert = "", askingPrice = 0) {
@@ -794,6 +927,10 @@ function renderMarketWarning(comps) {
   if (!marketWarning) return;
   marketWarning.classList.toggle("hidden", !weak);
   if (weak) {
+    if (Number(comps.compCount || 0) === 0) {
+      marketWarning.innerHTML = `⚠️ No verified sold comps found.<br /><span>Showing AI estimate based on:</span><br /><span>• player demand</span><br /><span>• rarity</span><br /><span>• serial numbering</span><br /><span>• parallel type</span><br /><span>• grade</span>`;
+      return;
+    }
     marketWarning.innerHTML = `🔴 Market Data Weak<br /><span>Only ${Number(comps.compCount || 0)} sold comps found.</span><br /><span>Price estimate may be unreliable.</span>`;
   }
 }
