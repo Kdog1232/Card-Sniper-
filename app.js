@@ -52,7 +52,10 @@ const marketMovers = document.getElementById("marketMovers");
 let imageDataUrl = "";
 let currentShareScan = null;
 const HISTORY_KEY = "card_sniper_scan_history_v1";
-const COMP_CACHE_KEY = "card_sniper_comp_cache_v3";
+const COMP_CACHE_KEY = "card_sniper_comp_cache_v4";
+const COMP_CACHE_TTL_MS = 1000 * 60 * 60 * 6;
+const AI_SCAN_TIMEOUT_MS = 8000;
+const SECONDARY_ANALYSIS_DELAY_MS = 50;
 const SHARE_BRAND_URL = "cardsniper.app";
 const PREMIUM_INSERTS = [
   "Downtown",
@@ -167,13 +170,44 @@ scanBtn.addEventListener("click", async () => {
   }
 
   scanBtn.disabled = true;
-  scanBtn.textContent = "Scanning...";
+  scanBtn.textContent = "Fast Scanning...";
+
+  const scanStart = performance.now();
+  const timings = { ai: 0, ebay: 0, grade: 0, render: 0, total: 0 };
 
   try {
-    const aiCard = await analyzeCardWithOpenAI(imageDataUrl, askingPrice, { mode: "quick_scan", compType: getCompType() });
+    const aiStart = performance.now();
+    const aiCard = await analyzeCardWithOpenAI(imageDataUrl, askingPrice, {
+      mode: "fast_scan",
+      compType: getCompType(),
+      timeoutMs: AI_SCAN_TIMEOUT_MS,
+    }).catch((err) => {
+      console.warn("AI scan returned partial result", err);
+      return buildPartialAiCard(askingPrice, err);
+    });
+    timings.ai = secondsSince(aiStart);
+
+    const primaryComps = buildImmediateComps(aiCard);
+    const primaryVerdict = scoreDeal(askingPrice, primaryComps.averageComp, primaryComps);
+    const primaryPayTargets = computePayTargets(primaryComps, aiCard);
+    const renderStart = performance.now();
+    renderResult({ aiCard, comps: primaryComps, verdict: primaryVerdict, askingPrice, payTargets: primaryPayTargets, fastMode: true, persistHistory: false });
+    timings.render = secondsSince(renderStart);
+
+    const ebayStart = performance.now();
     const comps = await fetchEbayComps(aiCard, getCompType());
+    timings.ebay = secondsSince(ebayStart);
+
+    const gradeStart = performance.now();
     const verdict = scoreDeal(askingPrice, comps.averageComp, comps);
-    renderResult({ aiCard, comps, verdict, askingPrice });
+    const payTargets = computePayTargets(comps, aiCard);
+    timings.grade = secondsSince(gradeStart);
+
+    renderResult({ aiCard, comps, verdict, askingPrice, payTargets, fastMode: true, persistHistory: true });
+    timings.total = secondsSince(scanStart);
+    logScanTimings(timings);
+
+    deferSecondaryAnalysis({ aiCard, comps, verdict, askingPrice, timings });
   } catch (err) {
     console.error(err);
     alert(`Scan failed: ${err.message}`);
@@ -192,8 +226,13 @@ async function analyzeCardWithOpenAI(base64Image, askingPrice, extraPayload = {}
     throw new Error("Missing Supabase config. Set window.SUPABASE_FUNCTION_URL and window.SUPABASE_ANON_KEY.");
   }
 
+  const timeoutMs = Number(extraPayload.timeoutMs || AI_SCAN_TIMEOUT_MS);
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+
   const response = await fetch(SCAN_FUNCTION_URL, {
     method: "POST",
+    signal: controller.signal,
     headers: {
       "Content-Type": "application/json",
       apikey: SUPABASE_ANON_KEY,
@@ -204,7 +243,7 @@ async function analyzeCardWithOpenAI(base64Image, askingPrice, extraPayload = {}
       askingPrice,
       ...extraPayload,
     }),
-  });
+  }).finally(() => window.clearTimeout(timeoutId));
 
   if (!response.ok) {
     const message = await response.text();
@@ -216,9 +255,11 @@ async function analyzeCardWithOpenAI(base64Image, askingPrice, extraPayload = {}
 }
 
 async function fetchEbayComps(aiCard, compType = "raw") {
-  const cacheKey = `${compType}|${aiCard.player}|${aiCard.year}|${aiCard.set}|${aiCard.variation}|${aiCard.cardNumber || ""}`.toLowerCase();
+  const cacheKey = buildCompCacheKey(aiCard, compType);
   const cached = readCompCache()[cacheKey];
-  if (cached && Date.now() - cached.ts < 1000 * 60 * 60 * 6) return cached.data;
+  if (cached && Date.now() - cached.ts < COMP_CACHE_TTL_MS) {
+    return { ...cached.data, cacheHit: true };
+  }
 
   const premiumInsert = detectPremiumInsert(aiCard);
   const fallbackBase = Number(aiCard.estimatedMarketValue || 0);
@@ -340,7 +381,7 @@ function deriveVerdictReason(label, asking, marketValue, comps = {}) {
   return "Near Market Value";
 }
 
-function renderResult({ aiCard, comps, verdict, askingPrice }) {
+function renderResult({ aiCard, comps, verdict, askingPrice, payTargets = null, fastMode = false, persistHistory = true }) {
   resultPanel.classList.remove("hidden");
   if (shareStatus) shareStatus.textContent = "Creates a shareable image for social posts.";
 
@@ -372,13 +413,17 @@ function renderResult({ aiCard, comps, verdict, askingPrice }) {
   currentShareScan = buildShareScan({ aiCard, comps, verdict, askingPrice, showRange, range, payTargets: null });
   askingValue.textContent = `$${askingPrice.toFixed(2)}`;
   upsideValue.textContent = `$${(comps.averageComp - askingPrice).toFixed(2)}`;
-  psaUpsideValue.textContent = `$${Math.max(0, (aiCard.gradedUpside || comps.highestComp) - askingPrice).toFixed(2)}`;
-  predictedPsaGrade.textContent = aiCard.predictedPsaGrade || "Unknown";
-  gemProbability.textContent = `${Number(aiCard.gemProbability || aiCard.psa10Probability || 0).toFixed(0)}%`;
-  gemScore.textContent = String(Number(aiCard.gemScore || aiCard.coinScore || 50));
-  psa9Value.textContent = `$${Number(aiCard.psa9Value || 0).toFixed(2)}`;
-  psa10Value.textContent = `$${Number(aiCard.psa10Value || 0).toFixed(2)}`;
-  const payTargets = computePayTargets(comps, aiCard);
+  if (fastMode) {
+    setSecondaryLoadingState();
+  } else {
+    psaUpsideValue.textContent = `$${Math.max(0, (aiCard.gradedUpside || comps.highestComp) - askingPrice).toFixed(2)}`;
+    predictedPsaGrade.textContent = aiCard.predictedPsaGrade || "Unknown";
+    gemProbability.textContent = `${Number(aiCard.gemProbability || aiCard.psa10Probability || 0).toFixed(0)}%`;
+    gemScore.textContent = String(Number(aiCard.gemScore || aiCard.coinScore || 50));
+    psa9Value.textContent = `$${Number(aiCard.psa9Value || 0).toFixed(2)}`;
+    psa10Value.textContent = `$${Number(aiCard.psa10Value || 0).toFixed(2)}`;
+  }
+  payTargets = payTargets || computePayTargets(comps, aiCard);
   currentShareScan.payTargets = payTargets;
   currentShareScan.goodBuyUnder = `$${payTargets.goodBuyUnder.toFixed(0)}`;
   goodBuyUnder.textContent = `$${payTargets.goodBuyUnder.toFixed(2)}`;
@@ -401,15 +446,16 @@ function renderResult({ aiCard, comps, verdict, askingPrice }) {
   marketMeta.textContent = comps.compCount
     ? `Confidence: ${formatConfidence(comps.confidence)} (${displayedConfidenceScore}/100) • Trend: ${String(comps.trend || "unknown").toUpperCase()} • Liquidity: ${String(comps.liquidity || "weak").toUpperCase()} • Raw/Graded: ${Number(comps.rawCount || 0)}/${Number(comps.gradedCount || 0)} • Auction/BIN: ${Number(comps.auctionCount || 0)}/${Number(comps.buyItNowCount || 0)}`
     : "Confidence: VERY LOW • Trend: UNKNOWN • Liquidity: WEAK";
-  const gradeText = aiCard.gradingRecommendation || "Not enough detail to recommend grading.";
-  gradingRecommendationValue.textContent = gradeText;
-  gradingRecommendation.textContent = `Grading Details: ${gradeText}`;
-  visualCondition.textContent = `Visual: L/R ${aiCard.centeringLeftRight || "Unknown"} • T/B ${aiCard.centeringTopBottom || "Unknown"} • Corners: ${aiCard.cornerWear || "Unknown"} • Surface: ${aiCard.surfaceScratches || "Unknown"}`;
+  if (!fastMode) {
+    renderSecondaryAnalysis({ aiCard, comps, askingPrice });
+  }
   transparencyMeta.textContent = comps.compCount
-    ? `Data Transparency: Confidence ${formatConfidence(comps.confidence)} based on ${Number(comps.compCount || 0)} sold comps.`
+    ? `Data Transparency: Confidence ${formatConfidence(comps.confidence)} based on ${Number(comps.compCount || 0)} sold comps${comps.cacheHit ? " (cached)." : "."}`
     : "Data Transparency: VERY LOW confidence because no verified sold comps were found; AI estimate fallback is based on card attributes.";
-  saveScanHistory({ aiCard, comps, verdict, askingPrice });
-  renderDashboard();
+  if (persistHistory) {
+    const historyEntry = saveScanHistory({ aiCard, comps, verdict, askingPrice });
+    updateDashboardIncrementally(historyEntry);
+  }
 
   compListings.innerHTML = "";
   comps.listings.forEach((listing) => {
@@ -945,7 +991,7 @@ function readScanHistory() {
 
 function saveScanHistory(scan) {
   const history = readScanHistory();
-  history.unshift({
+  const entry = {
     scannedAt: Date.now(),
     label: `${scan.aiCard.player} ${scan.aiCard.year} ${scan.aiCard.set} ${scan.aiCard.cardNumber || ""}`.trim(),
     marketValue: Number(scan.comps.medianComp || scan.comps.averageComp || scan.comps.valueRange?.low || 0),
@@ -953,8 +999,10 @@ function saveScanHistory(scan) {
     potentialProfit: Number((scan.comps.averageComp || 0) - (scan.askingPrice || 0)),
     psaUpside: Number(Math.max(0, (scan.aiCard.psa10Value || scan.aiCard.gradedUpside || 0) - (scan.askingPrice || 0))),
     trend: String(scan.comps.trend || "unknown"),
-  });
+  };
+  history.unshift(entry);
   localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, 75)));
+  return entry;
 }
 
 function renderDashboard() {
@@ -1010,4 +1058,135 @@ function fileToDataUrl(file) {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+}
+
+
+function buildImmediateComps(aiCard) {
+  const fallbackBase = Number(aiCard.estimatedMarketValue || 0);
+  const fallbackRange = buildAiEstimateRange(fallbackBase);
+  return {
+    averageComp: fallbackBase,
+    medianComp: fallbackBase,
+    lowestComp: fallbackRange.low,
+    highestComp: fallbackRange.high,
+    valueRange: fallbackRange,
+    recentSales: [],
+    listings: [],
+    compCount: 0,
+    confidence: "very_low",
+    confidenceScore: 0,
+    displayConfidenceScore: 0,
+    compQuality: "weak",
+    premiumInsert: detectPremiumInsert(aiCard),
+    noVerifiedComps: true,
+    aiEstimateFallback: true,
+    lowConfidenceRange: true,
+    usedFallback: true,
+    immediate: true,
+  };
+}
+
+function buildCompCacheKey(aiCard, compType = "raw") {
+  const insert = detectPremiumInsert(aiCard) || aiCard.insertName || aiCard.premiumInsert || aiCard.parallel || aiCard.variation || "";
+  return [compType, aiCard.player, aiCard.year, aiCard.set, insert, aiCard.cardNumber || ""]
+    .map((part) => String(part || "").trim().toLowerCase())
+    .join("|");
+}
+
+function buildPartialAiCard(askingPrice, error = new Error("AI timeout")) {
+  const timedOut = error?.name === "AbortError";
+  return {
+    player: "Unknown Card",
+    year: "Unknown",
+    set: "Unknown",
+    variation: "Fast Mode Partial",
+    condition: 5,
+    estimatedMarketValue: Number(askingPrice || 0),
+    gradedUpside: 0,
+    reasoning: timedOut ? "AI exceeded the 8 second fast-scan timeout. Showing a partial scan." : "AI scan failed. Showing a partial scan.",
+    cardNumber: "",
+    parallel: "",
+    predictedPsaGrade: "Loading...",
+    psa9Value: 0,
+    psa10Value: 0,
+    gradingRecommendation: "Deferred until after the initial result.",
+    gemScore: 50,
+    premiumInsert: "",
+    centeringLeftRight: "Deferred",
+    centeringTopBottom: "Deferred",
+    cornerWear: "Deferred",
+    surfaceScratches: "Deferred",
+    snipeScore: 50,
+    verdict: "FAIR",
+    partial: true,
+  };
+}
+
+function setSecondaryLoadingState() {
+  psaUpsideValue.textContent = "Loading...";
+  predictedPsaGrade.textContent = "Loading...";
+  gemProbability.textContent = "Loading...";
+  gemScore.textContent = "Loading...";
+  psa9Value.textContent = "Loading...";
+  psa10Value.textContent = "Loading...";
+  gradingRecommendationValue.textContent = "Loading after result...";
+  gradingRecommendation.textContent = "Grading Details: Loading after result...";
+  visualCondition.textContent = "Visual: Loading after result...";
+}
+
+function renderSecondaryAnalysis({ aiCard, comps, askingPrice }) {
+  psaUpsideValue.textContent = `$${Math.max(0, (aiCard.gradedUpside || comps.highestComp) - askingPrice).toFixed(2)}`;
+  predictedPsaGrade.textContent = aiCard.predictedPsaGrade || "Unknown";
+  gemProbability.textContent = `${Number(aiCard.gemProbability || aiCard.psa10Probability || 0).toFixed(0)}%`;
+  gemScore.textContent = String(Number(aiCard.gemScore || aiCard.coinScore || 50));
+  psa9Value.textContent = `$${Number(aiCard.psa9Value || 0).toFixed(2)}`;
+  psa10Value.textContent = `$${Number(aiCard.psa10Value || 0).toFixed(2)}`;
+  const gradeText = aiCard.gradingRecommendation || "Not enough detail to recommend grading.";
+  gradingRecommendationValue.textContent = gradeText;
+  gradingRecommendation.textContent = `Grading Details: ${gradeText}`;
+  visualCondition.textContent = `Visual: L/R ${aiCard.centeringLeftRight || "Unknown"} • T/B ${aiCard.centeringTopBottom || "Unknown"} • Corners: ${aiCard.cornerWear || "Unknown"} • Surface: ${aiCard.surfaceScratches || "Unknown"}`;
+}
+
+function deferSecondaryAnalysis(scan) {
+  window.setTimeout(() => {
+    renderSecondaryAnalysis(scan);
+    updateDashboardDeferred();
+  }, SECONDARY_ANALYSIS_DELAY_MS);
+}
+
+function secondsSince(start) {
+  return Number(((performance.now() - start) / 1000).toFixed(1));
+}
+
+function logScanTimings(timings) {
+  console.log("SCAN COMPLETE");
+  console.log(`AI: ${timings.ai.toFixed(1)}s`);
+  console.log(`eBay: ${timings.ebay.toFixed(1)}s`);
+  console.log(`Grade: ${timings.grade.toFixed(1)}s`);
+  console.log(`Render: ${timings.render.toFixed(1)}s`);
+  console.log(`Total: ${timings.total.toFixed(1)}s`);
+}
+
+function updateDashboardIncrementally(entry) {
+  if (!entry) return;
+  const currentValue = parseCurrency(totalCollectionValue.textContent);
+  const currentPsa = parseCurrency(totalPsaUpside.textContent);
+  const currentPnl = parseCurrency(totalProfitLoss.textContent);
+  totalCollectionValue.textContent = `$${(currentValue + Number(entry.marketValue || 0)).toFixed(2)}`;
+  totalPsaUpside.textContent = `$${(currentPsa + Number(entry.psaUpside || 0)).toFixed(2)}`;
+  totalProfitLoss.textContent = `$${(currentPnl + Number(entry.potentialProfit || 0)).toFixed(2)}`;
+  recentlyScanned.textContent = `Latest: ${entry.label}`;
+  if (Number(entry.potentialProfit || 0) > parseCurrency(biggestFlip.textContent)) {
+    biggestFlip.textContent = `${entry.label} ($${Number(entry.potentialProfit || 0).toFixed(2)})`;
+  }
+}
+
+function updateDashboardDeferred() {
+  window.setTimeout(renderDashboard, 0);
+}
+
+function parseCurrency(value) {
+  const matches = String(value || "").match(/-?\$?([0-9,.]+)/g);
+  if (!matches) return 0;
+  return Number(String(matches[matches.length - 1]).replace(/[$,]/g, "")) || 0;
 }

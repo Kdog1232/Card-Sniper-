@@ -6,6 +6,8 @@ const corsHeaders = {
 type ScanRequest = {
   image?: string;
   askingPrice?: number;
+  mode?: "fast_scan" | "quick_scan" | "deep_grading";
+  timeoutMs?: number;
 };
 
 type BaseAnalysis = {
@@ -58,6 +60,7 @@ type ScanResult = BaseAnalysis & {
 };
 
 Deno.serve(async (req: Request) => {
+  let requestAskingPrice = 0;
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
@@ -70,6 +73,7 @@ Deno.serve(async (req: Request) => {
     const body = (await req.json()) as ScanRequest;
     const image = body.image?.trim();
     const askingPrice = Number(body.askingPrice);
+    requestAskingPrice = askingPrice;
 
     if (!image || !Number.isFinite(askingPrice) || askingPrice <= 0) {
       return jsonResponse({ error: "Invalid request body. Expected image and askingPrice." }, 400);
@@ -81,7 +85,77 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: "Server misconfiguration." }, 500);
     }
 
-    const prompt = `You are a sports card analysis engine.
+    const mode = body.mode || "fast_scan";
+    const prompt = buildPrompt(askingPrice, mode);
+
+    const imageUrl = image.startsWith("data:image") ? image : `data:image/jpeg;base64,${image}`;
+
+    const timeoutMs = Math.min(Math.max(Number(body.timeoutMs || 8000), 1000), 8000);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    const openAiResp = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${openAiApiKey}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4.1-mini",
+        input: [
+          {
+            role: "user",
+            content: [
+              { type: "input_text", text: prompt },
+              { type: "input_image", image_url: imageUrl },
+            ],
+          },
+        ],
+      }),
+    }).finally(() => clearTimeout(timeoutId));
+
+    if (!openAiResp.ok) {
+      const errorText = await openAiResp.text();
+      console.error("OpenAI API error", { status: openAiResp.status, body: errorText });
+      return jsonResponse({ error: "Failed to analyze card image." }, 500);
+    }
+
+    const openAiData = await openAiResp.json();
+    const rawText = extractOutputText(openAiData);
+
+    if (!rawText) {
+      console.error("OpenAI response missing output text", { openAiData });
+      return jsonResponse(buildFallbackResult(askingPrice), 200);
+    }
+
+    console.log("RAW OPENAI RESPONSE:", rawText);
+
+    const parsed = safeParseScanResult(rawText, askingPrice);
+    if (!parsed) {
+      console.error("Could not parse OpenAI JSON", { rawText });
+      return jsonResponse(buildFallbackResult(askingPrice), 200);
+    }
+
+    return jsonResponse(parsed, 200);
+  } catch (error) {
+    console.error("scan-card function failed", error);
+    if (error instanceof DOMException && error.name === "AbortError") {
+      return jsonResponse({ ...buildFallbackResult(requestAskingPrice), partial: true, timeout: true }, 200);
+    }
+    return jsonResponse({ error: "Internal server error." }, 500);
+  }
+});
+
+
+function buildPrompt(askingPrice: number, mode: string): string {
+  const fastInstruction = mode === "fast_scan"
+    ? "FAST MODE: prioritize card identity, snipe score inputs, estimated value, and buy/pass decision. Keep reasoning to one short sentence. Skip extended visual condition, trend, collection, and grading narrative details; return Unknown or empty strings for details not visible immediately."
+    : "Return detailed grading and visual condition fields when visible.";
+
+  return `You are a sports card analysis engine.
+
+${fastInstruction}
 
 You MUST respond ONLY with valid raw JSON.
 
@@ -119,57 +193,7 @@ Card number, premium insert name, and parallel are critical for comp matching. I
 Detect premium inserts when visible: Downtown, Kaboom, Color Blast, Manga, Genesis, Gold Prizm, Silver Prizm, Zebra, Stained Glass, Blank Slate.
 gemScore is a 1-100 visual grading confidence score, not an investment score.
 predictedPsaGrade should be like "PSA 8", "PSA 9", "PSA 10", or "Unknown".`;
-
-    const imageUrl = image.startsWith("data:image") ? image : `data:image/jpeg;base64,${image}`;
-
-    const openAiResp = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${openAiApiKey}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4.1-mini",
-        input: [
-          {
-            role: "user",
-            content: [
-              { type: "input_text", text: prompt },
-              { type: "input_image", image_url: imageUrl },
-            ],
-          },
-        ],
-      }),
-    });
-
-    if (!openAiResp.ok) {
-      const errorText = await openAiResp.text();
-      console.error("OpenAI API error", { status: openAiResp.status, body: errorText });
-      return jsonResponse({ error: "Failed to analyze card image." }, 500);
-    }
-
-    const openAiData = await openAiResp.json();
-    const rawText = extractOutputText(openAiData);
-
-    if (!rawText) {
-      console.error("OpenAI response missing output text", { openAiData });
-      return jsonResponse(buildFallbackResult(askingPrice), 200);
-    }
-
-    console.log("RAW OPENAI RESPONSE:", rawText);
-
-    const parsed = safeParseScanResult(rawText, askingPrice);
-    if (!parsed) {
-      console.error("Could not parse OpenAI JSON", { rawText });
-      return jsonResponse(buildFallbackResult(askingPrice), 200);
-    }
-
-    return jsonResponse(parsed, 200);
-  } catch (error) {
-    console.error("scan-card function failed", error);
-    return jsonResponse({ error: "Internal server error." }, 500);
-  }
-});
+}
 
 function extractOutputText(data: any): string {
   return (

@@ -139,7 +139,7 @@ Deno.serve(async (req: Request) => {
       }))
       .sort((a, b) => b.score - a.score);
 
-    const sortedListings = scoredListings.map(({ score: _score, sold: _sold, ...listing }) => listing).slice(0, 50);
+    const sortedListings = scoredListings.map(({ score: _score, ...listing }) => listing).slice(0, 50);
     const rawPrices = sortedListings.map((item: EbayListing) => item.price);
     const prices = excludeOutlierPrices(rawPrices);
 
@@ -414,30 +414,53 @@ function jsonResponse(data: unknown, status = 200) {
 }
 
 async function fetchCompletedItems(appId: string, queries: string[]): Promise<any[]> {
+  const limitedQueries = [...new Set(queries.filter(Boolean))].slice(0, 7);
   const unique = new Map<string, any>();
-  for (const query of queries.slice(0, 7)) {
-    const searchUrl = new URL("https://svcs.ebay.com/services/search/FindingService/v1");
-    searchUrl.searchParams.set("OPERATION-NAME", "findCompletedItems");
-    searchUrl.searchParams.set("SERVICE-VERSION", "1.13.0");
-    searchUrl.searchParams.set("SECURITY-APPNAME", appId);
-    searchUrl.searchParams.set("RESPONSE-DATA-FORMAT", "JSON");
-    searchUrl.searchParams.set("REST-PAYLOAD", "");
-    searchUrl.searchParams.set("keywords", query);
-    searchUrl.searchParams.set("paginationInput.entriesPerPage", "50");
-    searchUrl.searchParams.set("itemFilter(0).name", "SoldItemsOnly");
-    searchUrl.searchParams.set("itemFilter(0).value", "true");
-    searchUrl.searchParams.set("sortOrder", "EndTimeSoonest");
+  const exactQuery = limitedQueries[0];
 
-    const ebayResp = await fetch(searchUrl.toString());
-    if (!ebayResp.ok) continue;
-    const ebayData = await ebayResp.json();
-    const items = ebayData?.findCompletedItemsResponse?.[0]?.searchResult?.[0]?.item ?? [];
-    for (const item of Array.isArray(items) ? items : []) {
-      const key = String(item?.itemId?.[0] ?? item?.viewItemURL?.[0] ?? Math.random());
-      if (!unique.has(key)) unique.set(key, item);
+  if (exactQuery) {
+    const exactItems = await fetchCompletedItemsForQuery(appId, exactQuery);
+    addUniqueItems(unique, exactItems);
+    console.log("Exact eBay search sold items:", exactItems.length);
+    if (exactItems.length >= 3) {
+      console.log("Exact eBay search returned 3+ sold comps; skipping broader variants.");
+      return [...unique.values()];
     }
   }
+
+  const broaderQueries = limitedQueries.slice(1);
+  const broaderResults = await Promise.all(broaderQueries.map((query) => fetchCompletedItemsForQuery(appId, query).catch(() => [])));
+  broaderResults.flat().forEach((item) => addUniqueItem(unique, item));
   return [...unique.values()];
+}
+
+async function fetchCompletedItemsForQuery(appId: string, query: string): Promise<any[]> {
+  const searchUrl = new URL("https://svcs.ebay.com/services/search/FindingService/v1");
+  searchUrl.searchParams.set("OPERATION-NAME", "findCompletedItems");
+  searchUrl.searchParams.set("SERVICE-VERSION", "1.13.0");
+  searchUrl.searchParams.set("SECURITY-APPNAME", appId);
+  searchUrl.searchParams.set("RESPONSE-DATA-FORMAT", "JSON");
+  searchUrl.searchParams.set("REST-PAYLOAD", "");
+  searchUrl.searchParams.set("keywords", query);
+  searchUrl.searchParams.set("paginationInput.entriesPerPage", "50");
+  searchUrl.searchParams.set("itemFilter(0).name", "SoldItemsOnly");
+  searchUrl.searchParams.set("itemFilter(0).value", "true");
+  searchUrl.searchParams.set("sortOrder", "EndTimeSoonest");
+
+  const ebayResp = await fetch(searchUrl.toString());
+  if (!ebayResp.ok) return [];
+  const ebayData = await ebayResp.json();
+  const items = ebayData?.findCompletedItemsResponse?.[0]?.searchResult?.[0]?.item ?? [];
+  return Array.isArray(items) ? items : [];
+}
+
+function addUniqueItems(unique: Map<string, any>, items: any[]) {
+  items.forEach((item) => addUniqueItem(unique, item));
+}
+
+function addUniqueItem(unique: Map<string, any>, item: any) {
+  const key = String(item?.itemId?.[0] ?? item?.viewItemURL?.[0] ?? Math.random());
+  if (!unique.has(key)) unique.set(key, item);
 }
 
 function computeConfidenceScore(prices: number[], listings: EbayListing[]): number {
